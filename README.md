@@ -35,16 +35,27 @@ $ cat ~/.pi/agent/memory/MEMORY.md
 
 ## Installation
 
+Once the package is on npm, the installer CLI is the simplest path:
+
 ```bash
-# From npm, once published
-opencode plugin add oc2-memory
+npx oc2-memory install     # adds "oc2-memory" to your global OpenCode config
+npx oc2-memory status      # config entry + memory path + qmd / collection / embeddings
+npx oc2-memory uninstall   # removes the entry (leaves OpenCode's npm cache alone)
 ```
 
-`opencode plugin add` writes the package into the **`plugins`** array of your global OpenCode config (`~/.config/opencode/opencode.json`) and lets OpenCode fetch it into its own cache under `~/.cache/opencode/`. The legacy `plugin` key and `opencode plugin <repo>` form belong to older OpenCode versions.
+`install` adds the package spec to the **`plugins`** array of your global OpenCode config (`~/.config/opencode/opencode.json`) and lets OpenCode fetch it into its own cache under `~/.cache/opencode/`. The write is atomic and `0600`, and a config file that fails to parse is never overwritten. `opencode plugin add oc2-memory` does the same thing if you prefer the host CLI.
 
-> **A git specifier will not work here yet.** `opencode plugin add github:swapdte/oc2-memory` fails with *"Plugin package has no server or TUI entrypoint"*. OpenCode installs with lifecycle scripts disabled, so nothing runs a build, and this repository does not commit `dist/`. A `prepare` script cannot fix that — the install never executes it. Until the package is on npm, run it from a local build (see [Development](#development)).
+From a checkout, register the built directory instead — exactly the path `opencode plugin add` refuses:
 
-> **`opencode plugin add` refuses local paths.** OpenCode 2.x installs from an npm or git specifier only; `file:`, `./dir` and absolute paths are rejected. A checkout still runs — through the config rather than the CLI.
+```bash
+npx oc2-memory install --local /absolute/path/to/oc2-memory
+```
+
+`--local` builds the checkout if `dist/` is missing or stale, then registers the absolute **`dist/`** directory in the config.
+
+> **A git specifier will not work.** `opencode plugin add github:swapdte/oc2-memory` fails with *"Plugin package has no server or TUI entrypoint"*. OpenCode installs with lifecycle scripts disabled, so nothing runs a build, and this repository does not commit `dist/`. A `prepare` script cannot fix that — the install never executes it. Use `npx oc2-memory install --local <dir>` instead.
+
+> **`opencode plugin add` refuses local paths.** OpenCode 2.x installs from an npm or git specifier only; `file:`, `./dir` and absolute paths are rejected. That is why the CLI writes the config itself.
 
 That's it — the seven core tools (`memory_write`, `memory_forget`, `memory_restore`, `memory_read`, `scratchpad`, `memory_search`, `memory_status`) work with no other setup.
 
@@ -206,7 +217,7 @@ Deliberately **not** ported from pi-memory:
 
 ## Development
 
-The plugin is a single source file, `index.ts`, built with `tsup` to `dist/index.js`. OpenCode resolves a plugin's entrypoints as module paths, so there is a build step — but source and artefact are one file each.
+The plugin is `index.ts`, built with `tsup` to `dist/index.js`. The installer CLI is a second entry point, `bin/cli.ts`, built to `dist/cli.js` by a separate `tsup` run so the plugin bundle stays standalone. OpenCode resolves a plugin's entrypoints as module paths, so there is a build step.
 
 ### Working documents
 
@@ -214,11 +225,17 @@ The plugin is a single source file, `index.ts`, built with `tsup` to `dist/index
 
 ```bash
 npm install          # also points git at .githooks
-npm run build        # tsup → dist/, then tsc --noEmit
+npm run build        # tsup → dist/index.js + dist/cli.js, then tsc --noEmit
 npm run lint         # biome
 ```
 
-To run a local build, add the **built directory** to the `plugins` array of `~/.config/opencode/opencode.json` — `opencode plugin add` refuses local paths, so this is a config edit:
+To run a local build, register the built directory — the easiest way is the CLI itself, which builds if needed and writes the config:
+
+```bash
+npx oc2-memory install --local /absolute/path/to/oc2-memory
+```
+
+Equivalently, add the **built directory** to the `plugins` array of `~/.config/opencode/opencode.json` by hand — `opencode plugin add` refuses local paths, so this is a config edit:
 
 ```json
 { "plugins": ["/absolute/path/to/oc2-memory/dist"] }

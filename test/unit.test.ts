@@ -11,6 +11,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { addPluginEntry, readConfig, removePluginEntry, resolveConfigPath, writeConfig } from "../bin/cli.js";
+
 import {
 	_clearEmbedInFlight,
 	_clearUpdateTimer,
@@ -2178,5 +2180,102 @@ describe("V2 setup (snapshot injection)", () => {
 		// The handoff write must not dirty the snapshot.
 		handlers.context(contextEvent);
 		expect(contextEvent.system[0].text).toBe(snapshotBefore);
+	});
+});
+
+// ==========================================================================
+// 13. Installer CLI config helpers
+// ==========================================================================
+
+describe("installer CLI config helpers", () => {
+	let dir: string;
+	let configPath: string;
+
+	beforeEach(() => {
+		dir = fs.mkdtempSync(path.join(os.tmpdir(), "oc2-cli-"));
+		configPath = path.join(dir, "opencode.json");
+	});
+
+	afterEach(() => {
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("resolveConfigPath prefers OPENCODE_CONFIG", () => {
+		expect(
+			resolveConfigPath({ OPENCODE_CONFIG: path.join("tmp", "explicit.json"), HOME: path.join("home", "u") }),
+		).toBe(path.join("tmp", "explicit.json"));
+	});
+
+	test("resolveConfigPath uses XDG_CONFIG_HOME, then HOME", () => {
+		expect(resolveConfigPath({ XDG_CONFIG_HOME: path.join("xdg"), HOME: path.join("home", "u") })).toBe(
+			path.join("xdg", "opencode", "opencode.json"),
+		);
+		expect(resolveConfigPath({ HOME: path.join("home", "u") })).toBe(
+			path.join("home", "u", ".config", "opencode", "opencode.json"),
+		);
+	});
+
+	test("addPluginEntry creates the plugins array on an empty config", () => {
+		const { config, added } = addPluginEntry({}, "oc2-memory");
+		expect(added).toBe(true);
+		expect(config.plugins).toEqual(["oc2-memory"]);
+	});
+
+	test("addPluginEntry preserves existing entries and is idempotent", () => {
+		const third = { package: "third-plugin", options: { flag: true } };
+		const base = { plugins: ["other-plugin", third] };
+
+		const first = addPluginEntry(base, "oc2-memory");
+		expect(first.added).toBe(true);
+		expect(first.config.plugins).toEqual(["other-plugin", third, "oc2-memory"]);
+
+		const second = addPluginEntry(first.config, "oc2-memory");
+		expect(second.added).toBe(false);
+		expect(second.config.plugins).toEqual(["other-plugin", third, "oc2-memory"]);
+	});
+
+	test("removePluginEntry removes only our entries, string and object form", () => {
+		const config = {
+			plugins: ["oc2-memory", "other", { package: "oc2-memory" }, { package: "other" }],
+		};
+
+		const { config: next, removed } = removePluginEntry(config, ["oc2-memory"]);
+		expect(removed).toBe(2);
+		expect(next.plugins).toEqual(["other", { package: "other" }]);
+	});
+
+	test("removePluginEntry detects a local checkout path via its package.json", () => {
+		const repo = fs.mkdtempSync(path.join(os.tmpdir(), "oc2-repo-"));
+		fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "oc2-memory" }), "utf-8");
+		const distDir = path.join(repo, "dist");
+
+		const config = { plugins: ["oc2-memory", distDir, "other", { package: distDir }] };
+		const { config: next, removed } = removePluginEntry(config, ["oc2-memory"]);
+
+		expect(removed).toBe(3);
+		expect(next.plugins).toEqual(["other"]);
+		fs.rmSync(repo, { recursive: true, force: true });
+	});
+
+	test("writeConfig writes mode 0600 and round-trips", () => {
+		writeConfig(configPath, { plugins: ["oc2-memory"] });
+		expect(readConfig(configPath)).toEqual({ plugins: ["oc2-memory"] });
+		expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+	});
+
+	test("writeConfig is atomic: no .tmp file is left behind", () => {
+		writeConfig(configPath, { plugins: [] });
+		expect(fs.existsSync(`${configPath}.tmp`)).toBe(false);
+	});
+
+	test("readConfig returns {} for a missing file and does not create it", () => {
+		expect(readConfig(configPath)).toEqual({});
+		expect(fs.existsSync(configPath)).toBe(false);
+	});
+
+	test("readConfig aborts on corrupt JSON and leaves the file untouched", () => {
+		fs.writeFileSync(configPath, "{ not json", "utf-8");
+		expect(() => readConfig(configPath)).toThrow();
+		expect(fs.readFileSync(configPath, "utf-8")).toBe("{ not json");
 	});
 });

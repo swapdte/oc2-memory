@@ -7,10 +7,11 @@ Port von [pi-memory](https://github.com/jayzeng/pi-memory) als **Opencode-V2-Plu
 - Vorgehen: TDD (red → green → refactor), siehe `AGENTS.md`.
 - **Ziel-API: `@opencode/plugin@2.0.2` (V2).** Kein V1-Fallback. Siehe `DECISIONS.md` → API-Lage.
 
-**Aktuelle Phase: 5 (Release).** Phase 0–4 sind abgeschlossen. Der Port ist auf V2 vollständig:
-`index.ts` ist ein reines V2-Plugin **ohne** `@earendil-works/pi-*`-Abhängigkeit, `npm test`
-186/186 grün, `dist/index.js` enthält keine pi-Referenz. Als Nächstes: Release (Phase 5) und
-Installer-CLI (Phase 6).
+**Aktuelle Phase: 5 (Release).** Phase 0–4 sind abgeschlossen, Phase 6 (Installer-CLI) ist
+code-seitig fertig — der **Release steht noch aus**. `index.ts` ist ein reines V2-Plugin **ohne**
+`@earendil-works/pi-*`-Abhängigkeit; `bin/cli.ts` liefert `npx oc2-memory install|uninstall|status`
+(Node-kompatibel). `npm test` 196/196 grün, `dist/index.js` enthält keine pi-Referenz. Als Nächstes:
+npm-Release (Phase 5), dann den Install-Smoke-Test der CLI.
 
 ---
 
@@ -168,20 +169,23 @@ Reihenfolge nach Abhängigkeit, je Tool rote Tests zuerst:
 ### Phase 6 — Installer-CLI (Installation per `npx`)
 Entschieden: die Installation läuft über **npx** (nicht bunx). Das Paket wird damit
 zum Doppelwesen wie `oh-my-opencode-slim` — `main` = Plugin, `bin` = CLI.
-- [ ] `bin`-Feld + zweites Build-Target für die CLI, als **Node-kompatibles**
+- [x] `bin`-Feld + zweites Build-Target für die CLI, als **Node-kompatibles**
       Bundle, damit `npx oc2-memory …` auch ohne Bun funktioniert.
-- [ ] `npx oc2-memory install` — Eintrag in die `plugins`-Liste der globalen Config
+- [x] `npx oc2-memory install` — Eintrag in die `plugins`-Liste der globalen Config
       schreiben: idempotent, atomar (tmp + rename), Modus 0600. Option `--local <dir>`:
       baut bei Bedarf und trägt den **`dist/`-Verzeichnispfad** ein — der einzige
       Installationsweg, den `opencode plugin add` verweigert.
-- [ ] `npx oc2-memory uninstall` — Eintrag entfernen. Hinweis ausgeben: das Paket
+- [x] `npx oc2-memory uninstall` — Eintrag entfernen. Hinweis ausgeben: das Paket
       bleibt unter `~/.cache/opencode/npm/…` liegen (OpenCode löscht den Cache nicht).
-- [ ] `npx oc2-memory status` — Doctor: Config-Eintrag vorhanden?, gewählter
+- [x] `npx oc2-memory status` — Doctor: Config-Eintrag vorhanden?, gewählter
       Speicherordner (pi-Pfad vs. Fallback), qmd vorhanden?, Collection, Embeddings.
-- **Gate:** `npx oc2-memory install` in einer sauberen Config → OpenCode lädt das
-  Plugin; `status` zeigt den Eintrag; `uninstall` entfernt ihn wieder.
+- **Gate — erfüllt:** `node dist/cli.js install` / `status` / `uninstall` wurden gegen
+  eine isolierte Config (`HOME`/`XDG_CONFIG_HOME` auf ein Temp-Verzeichnis) ausgeführt;
+  `install` ist idempotent, `--local .` registriert den absoluten `dist/`-Pfad,
+  `uninstall` entfernt beide, kaputtes JSON bricht ohne Überschreiben ab. Läuft unter
+  **Node**, ohne Bun.
 - Erst nach Phase 5 sinnvoll: die CLI setzt das veröffentlichte npm-Paket mit
-  `dist/` voraus.
+  `dist/` voraus. → **Code fertig, Release (Phase 5) steht noch aus.**
 
 ---
 

@@ -27,6 +27,10 @@ port's target behaviour, they win.
 - `index.ts` — the entire plugin in one source file. It is **built**, not loaded raw: OpenCode
   resolves a plugin's entrypoints as module paths, so `tsup` bundles it to `dist/index.js`, which is
   what `main` and `exports` point at. One source file, one artefact.
+- `bin/cli.ts` — the `npx oc2-memory` installer (install/uninstall/status). A `bin` needs its own JS
+  entry file, so it is a **second** source file and a second `tsup` output (`dist/cli.js`). It runs
+  under **Node**, so: no Bun APIs. It reuses `index.ts` helpers (path resolution, qmd) as the single
+  source of truth.
 - `test/` — `unit.test.ts` (fast, deterministic, no network), `e2e.ts` (spawns a real agent),
   `eval-recall.ts` (recall A/B), `qmd-cache.ts`
 - `design.md` — upstream's rationale. Still the best account of *why* the design is what it is,
@@ -68,7 +72,10 @@ uses the active memory directory. Back it up and restore it; never leave a test'
 - Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`), imperative. No DCO sign-off.
 - Keep `index.ts` self-contained — one source file, one built artefact. `tsup` is the only build
   step, and it exists because OpenCode loads a plugin by module path; prefer editing `index.ts` over
-  adding source files or more tooling.
+  adding source files or more tooling. **One exception:** `bin/cli.ts` is a second source file and a
+  second `tsup` entry (`build:plugin` + `build:cli`), because a `bin` requires its own JS entry.
+  Keep the two builds separate so `dist/index.js` stays a standalone plugin bundle with no shared
+  chunk.
 - `@opencode/plugin@2.0.2` is a **devDependency** (used for types only). The plugin has no runtime
   dependencies, and there are no `@earendil-works/pi-*` packages left.
 

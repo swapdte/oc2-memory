@@ -8,6 +8,9 @@
 		".": "./dist/index.js",
 		"./server": "./dist/index.js"
 	},
+	"bin": {
+		"oc2-memory": "./dist/cli.js"
+	},
 	"license": "MIT",
 	"author": "swapdte",
 	"contributors": [
@@ -41,7 +44,9 @@
 		"access": "public"
 	},
 	"scripts": {
-		"build": "tsup index.ts --format esm --dts && tsc -p tsconfig.json --noEmit",
+		"build": "npm run build:plugin && npm run build:cli && tsc -p tsconfig.json --noEmit",
+		"build:plugin": "tsup index.ts --format esm --dts",
+		"build:cli": "tsup bin/cli.ts --format esm",
 		"prepublishOnly": "npm run build",
 		"lint": "biome check .",
 		"test": "bun test test/unit.test.ts",
