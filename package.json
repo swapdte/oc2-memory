@@ -1,6 +1,6 @@
 {
 	"name": "oc2-memory",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "OpenCode V2 plugin that gives the coding agent a memory: durable facts, a daily log and a scratchpad as plain markdown, with optional qmd-powered search. A port of pi-memory.",
 	"type": "module",
 	"main": "./dist/index.js",
