@@ -196,9 +196,12 @@ describe("GitHub Actions workflows", () => {
 		expect(e2eWorkflow).toContain("run: npm run test:e2e");
 	});
 
-	test("publishes matching release tags on the supported Node runtime with provenance", () => {
+	test("publishes matching release tags via trusted publishing, on the supported Node runtime", () => {
 		expect(publishWorkflow).toContain('tags:\n      - "v*"');
-		expect(publishWorkflow).toContain(`NODE_AUTH_TOKEN: \${{ secrets.NPM_TOKEN }}`);
+		// Trusted publishing (OIDC) replaced the token: the workflow authenticates
+		// through `id-token: write` and must not point at a secret any more.
+		expect(publishWorkflow).not.toContain("NODE_AUTH_TOKEN");
+		expect(publishWorkflow).not.toContain("secrets.NPM_TOKEN");
 		expect(publishWorkflow).toContain('node-version: "22.19.0"');
 		expect(publishWorkflow).toContain("id-token: write");
 		expect(publishWorkflow).toContain(`tag="\${GITHUB_REF_NAME#v}"`);
