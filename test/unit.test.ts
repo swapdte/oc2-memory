@@ -6,7 +6,7 @@
  * Uses temp directories for all file I/O — does not touch real memory files.
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, setSystemTime, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -234,8 +234,8 @@ describe("GitHub Actions workflows", () => {
 	});
 });
 
-// We need to import the default export to register tools
-import registerExtension from "../index.js";
+// We need to import the extension registration and V2 setup entry points
+import oc2MemoryPlugin, { registerExtension, setup } from "../index.js";
 
 // ==========================================================================
 // 1. Utility functions
@@ -2761,4 +2761,218 @@ describe("probeEmbeddings", () => {
 		}) as any);
 		expect(await probeEmbeddings()).toBe("unknown");
 	}, 10_000);
+});
+
+// ==========================================================================
+// 12. OpenCode V2 plugin skeleton + snapshot injection
+// ==========================================================================
+
+function createMockPluginCtx() {
+	const handlers: Record<string, (event: any) => any> = {};
+	const ctx = {
+		session: {
+			hook(name: string, callback: (event: any) => any) {
+				handlers[name] = callback;
+				return Promise.resolve({ dispose: async () => {} });
+			},
+		},
+		event: {
+			subscribe: async function* (_options?: { signal?: AbortSignal }) {},
+		},
+		location: { directory: process.cwd() },
+	};
+	return { ctx, handlers };
+}
+
+function makeSystemEvent(sessionID = "s1", system: Array<{ type: "text"; text: string }> = []) {
+	return { sessionID, system };
+}
+
+describe("V2 setup (snapshot injection)", () => {
+	let handlers: Record<string, (event: any) => any>;
+	let clearSetup: (() => Promise<void> | void) | undefined;
+
+	beforeEach(async () => {
+		setupTmpDir();
+		ensureDirs();
+		_setQmdAvailable(false);
+		const mock = createMockPluginCtx();
+		handlers = mock.handlers;
+		clearSetup = await setup(mock.ctx as any);
+	});
+
+	afterEach(async () => {
+		setSystemTime();
+		if (clearSetup) await clearSetup();
+		clearSetup = undefined;
+		cleanupTmpDir();
+	});
+
+	test("default export is a V2 plugin with id and setup", () => {
+		expect(oc2MemoryPlugin.id).toBe("oc2-memory");
+		expect(typeof oc2MemoryPlugin.setup).toBe("function");
+	});
+
+	test("registers context and compaction hooks", () => {
+		expect(typeof handlers.context).toBe("function");
+		expect(typeof handlers.compaction).toBe("function");
+	});
+
+	test("appends the snapshot once and replaces it on later turns", () => {
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "durable fact\n", "utf-8");
+		const event = makeSystemEvent("s1", [{ type: "text", text: "base instructions" }]);
+
+		handlers.context(event);
+		const afterFirst = event.system.map((part) => part.text).join("\n");
+		expect(afterFirst).toContain("durable fact");
+		expect(afterFirst.split("<!-- oc2-memory:snapshot -->").length - 1).toBe(1);
+		expect(event.system.length).toBe(2);
+
+		handlers.context(event);
+		const afterSecond = event.system.map((part) => part.text).join("\n");
+		expect(afterSecond.split("<!-- oc2-memory:snapshot -->").length - 1).toBe(1);
+		expect(event.system.length).toBe(2);
+		expect(event.system[0].text).toBe("base instructions");
+	});
+
+	test("keeps the block byte-stable and ignores daily writes", () => {
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "durable fact\n", "utf-8");
+		const event = makeSystemEvent("s1");
+		handlers.context(event);
+		const first = event.system[0].text;
+
+		fs.writeFileSync(dailyPath(todayStr()), "a brand new daily note\n", "utf-8");
+		handlers.context(event);
+		const second = event.system[0].text;
+
+		expect(second).toBe(first);
+		expect(second).not.toContain("brand new daily note");
+	});
+
+	test("long-term write marks sessions dirty so the next turn rebuilds", async () => {
+		const mockPi = createMockPi();
+		registerExtension(mockPi.pi as any);
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "the old fact\n", "utf-8");
+
+		const event = makeSystemEvent("s1");
+		handlers.context(event);
+		const first = event.system[0].text;
+		expect(first).toContain("the old fact");
+
+		await mockPi.tools.memory_write.execute(
+			"c1",
+			{ target: "long_term", content: "the brand new fact" },
+			null,
+			null,
+			createMockCtx("s1"),
+		);
+
+		handlers.context(event);
+		const second = event.system[0].text;
+		expect(second).toContain("the brand new fact");
+		expect(second).not.toBe(first);
+	});
+
+	test("memory_forget and memory_restore mark sessions dirty", async () => {
+		const mockPi = createMockPi();
+		registerExtension(mockPi.pi as any);
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "<!-- ts [s] -->\nsecret fact\n\nkeep me\n", "utf-8");
+
+		const event = makeSystemEvent("s1");
+		handlers.context(event);
+		expect(event.system[0].text).toContain("secret fact");
+
+		const forget = await mockPi.tools.memory_forget.execute(
+			"c1",
+			{ match: "secret fact" },
+			null,
+			null,
+			createMockCtx("s1"),
+		);
+		handlers.context(event);
+		expect(event.system[0].text).not.toContain("secret fact");
+		const afterForget = event.system[0].text;
+
+		await mockPi.tools.memory_restore.execute(
+			"c2",
+			{ recoveryId: forget.details.recoveryId },
+			null,
+			null,
+			createMockCtx("s1"),
+		);
+		handlers.context(event);
+		expect(event.system[0].text).not.toBe(afterForget);
+		expect(event.system[0].text).toContain("secret fact");
+	});
+
+	test("daily and scratchpad writes leave the snapshot clean", async () => {
+		const mockPi = createMockPi();
+		registerExtension(mockPi.pi as any);
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "durable fact\n", "utf-8");
+
+		const event = makeSystemEvent("s1");
+		handlers.context(event);
+		const first = event.system[0].text;
+
+		await mockPi.tools.memory_write.execute(
+			"c1",
+			{ target: "daily", content: "a daily note" },
+			null,
+			null,
+			createMockCtx("s1"),
+		);
+		await mockPi.tools.scratchpad.execute(
+			"c1",
+			{ action: "add", text: "a scratchpad item" },
+			null,
+			null,
+			createMockCtx("s1"),
+		);
+
+		handlers.context(event);
+		expect(event.system[0].text).toBe(first);
+	});
+
+	test("rebuilds when the calendar day changes", () => {
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "old day fact\n", "utf-8");
+		const event = makeSystemEvent("s1");
+		handlers.context(event);
+		expect(event.system[0].text).toContain("old day fact");
+
+		// Changed on disk without a dirty marker: must stay cached today…
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "next day fact\n", "utf-8");
+		handlers.context(event);
+		expect(event.system[0].text).toContain("old day fact");
+		expect(event.system[0].text).not.toContain("next day fact");
+
+		// …and rebuild once the calendar day rolls over.
+		setSystemTime(new Date(Date.now() + 24 * 60 * 60 * 1000));
+		handlers.context(event);
+		expect(event.system[0].text).toContain("next day fact");
+	});
+
+	test("compaction appends a handoff part, writes the daily log, and keeps the snapshot clean", async () => {
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "durable fact\n", "utf-8");
+		fs.writeFileSync(path.join(tmpDir, "SCRATCHPAD.md"), "- [ ] open task\n", "utf-8");
+
+		const contextEvent = makeSystemEvent("s1");
+		handlers.context(contextEvent);
+		const snapshotBefore = contextEvent.system[0].text;
+
+		const event: any = { sessionID: "s1", system: [], result: "keep this result" };
+		await handlers.compaction(event);
+
+		expect(event.result).toBe("keep this result");
+		expect(event.system.length).toBe(1);
+		expect(event.system[0].text).toContain("<!-- oc2-memory:handoff -->");
+		expect(event.system[0].text).toContain("open task");
+
+		const daily = fs.readFileSync(dailyPath(todayStr()), "utf-8");
+		expect(daily).toContain("<!-- oc2-memory:handoff -->");
+		expect(daily).toContain("open task");
+
+		// The handoff write must not dirty the snapshot.
+		handlers.context(contextEvent);
+		expect(contextEvent.system[0].text).toBe(snapshotBefore);
+	});
 });

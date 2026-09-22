@@ -36,6 +36,7 @@ import {
 	type SessionEntry,
 	serializeConversation,
 } from "@earendil-works/pi-coding-agent";
+import type { Plugin } from "@opencode/plugin";
 
 // ---------------------------------------------------------------------------
 // Paths (mutable for testing via _setBaseDir / _resetBaseDir)
@@ -1621,7 +1622,7 @@ export function _resetMemorySnapshot() {
 // Extension entry point
 // ---------------------------------------------------------------------------
 
-export default function (pi: ExtensionAPI) {
+export function registerExtension(pi: ExtensionAPI) {
 	// --- session_start: detect qmd, auto-setup collection ---
 	pi.on("session_start", async (_event, ctx) => {
 		exitSummaryReason = null;
@@ -1924,6 +1925,7 @@ export default function (pi: ExtensionAPI) {
 			// Daily writes are high-frequency and already echoed via tool-call
 			// args — they are intentionally NOT marked dirty.
 			snapshotDirty = true;
+			markAllSessionsDirty();
 
 			if (mode === "overwrite") {
 				const stamped = `<!-- last updated: ${ts} [${sid}] -->\n${content}`;
@@ -2332,6 +2334,7 @@ export default function (pi: ExtensionAPI) {
 			// copied into persisted correction messages. This intentionally spends one
 			// cache invalidation on an explicit deletion.
 			refreshMemorySnapshot("memory_forget");
+			markAllSessionsDirty();
 			await ensureQmdAvailableForUpdate();
 			scheduleQmdUpdate();
 
@@ -2402,6 +2405,7 @@ export default function (pi: ExtensionAPI) {
 				// Restore changes which durable facts are authoritative, so refresh the
 				// snapshot instead of persisting restored content in a correction message.
 				refreshMemorySnapshot("memory_restore");
+				markAllSessionsDirty();
 				await ensureQmdAvailableForUpdate();
 				scheduleQmdUpdate();
 			}
@@ -2622,3 +2626,157 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 }
+
+// ---------------------------------------------------------------------------
+// OpenCode V2 plugin entry point
+//
+// OpenCode loads a plugin file only when its default export is `{ id, setup }`.
+// The pi-shaped `registerExtension` above is kept verbatim until Phase 3; this
+// section is the V2 skeleton plus the cached snapshot injection.
+// ---------------------------------------------------------------------------
+
+const SNAPSHOT_SENTINEL = "<!-- oc2-memory:snapshot -->";
+const HANDOFF_SENTINEL = "<!-- oc2-memory:handoff -->";
+const HANDOFF_MAX_LINES = 40;
+const HANDOFF_MAX_CHARS = 4_000;
+
+type SnapshottedPart = { type: "text"; text: string };
+
+interface SessionSnapshot {
+	block: string;
+	dayKey: string;
+	dirty: boolean;
+}
+
+// The memory store is global, so a long-term write has to invalidate every
+// live session's block; the block itself is cached per session.
+const sessionSnapshots = new Map<string, SessionSnapshot>();
+const warnedSessions = new Set<string>();
+
+/** Mark every live session's snapshot stale (long-term writes, forget, restore). */
+export function markAllSessionsDirty() {
+	for (const entry of sessionSnapshots.values()) entry.dirty = true;
+}
+
+/**
+ * Replace the system part carrying the snapshot sentinel in place, or append a
+ * new one. The V2 context hook fires on every request, so without the sentinel
+ * lookup each turn would append another copy of the block.
+ */
+export function upsertSnapshotPart<T extends SnapshottedPart>(system: readonly T[], block: string): T[] {
+	const index = system.findIndex((part) => part.type === "text" && part.text.includes(SNAPSHOT_SENTINEL));
+	if (index === -1) {
+		return [...system, { type: "text", text: block } as T];
+	}
+	return system.map((part, i) => (i === index ? { ...part, text: block } : part));
+}
+
+/**
+ * Resolve the block for one session, rebuilding only when the cached copy was
+ * invalidated or the calendar day rolled over.
+ */
+function getSessionSnapshot(sessionID: string): string {
+	const today = todayStr();
+	const cached = sessionSnapshots.get(sessionID);
+	if (!cached || cached.dirty || cached.dayKey !== today) {
+		const firstBuild = !cached;
+		const block = `${SNAPSHOT_SENTINEL}\n${buildMemoryContext("")}`;
+		sessionSnapshots.set(sessionID, { block, dayKey: today, dirty: false });
+		if (firstBuild) {
+			// No toast exists in the V2 server context; a warning is the only channel.
+			console.warn(`[oc2-memory] snapshot built (${Buffer.byteLength(block, "utf-8")} bytes) from ${MEMORY_DIR}`);
+		}
+	}
+	return sessionSnapshots.get(sessionID)?.block ?? "";
+}
+
+/**
+ * Build the compaction handoff section: open scratchpad items plus the tail of
+ * today's daily log, capped by the shared section formatter.
+ */
+function buildHandoffSection(): string {
+	const parts: string[] = [];
+
+	const scratchpad = readFileSafe(SCRATCHPAD_FILE);
+	if (scratchpad?.trim()) {
+		const openItems = parseScratchpad(scratchpad).filter((item) => !item.done);
+		if (openItems.length > 0) {
+			parts.push("**Open scratchpad items:**", serializeScratchpad(openItems).trimEnd());
+		}
+	}
+
+	const todayContent = readFileSafe(dailyPath(todayStr()));
+	if (todayContent?.trim()) {
+		const { lines } = truncateLines(todayContent.trim().split("\n"), HANDOFF_MAX_LINES, "end");
+		parts.push("**Recent daily log context:**", lines.join("\n"));
+	}
+
+	if (parts.length === 0) return "";
+	return formatContextSection("## Session Handoff", parts.join("\n\n"), "end", HANDOFF_MAX_LINES, HANDOFF_MAX_CHARS);
+}
+
+/** Append the handoff block to today's daily log so it survives the session. */
+function appendHandoffToDaily(block: string) {
+	ensureDirs();
+	const filePath = dailyPath(todayStr());
+	const existing = readFileSafe(filePath) ?? "";
+	const separator = existing.trim() ? "\n\n" : "";
+	fs.writeFileSync(filePath, existing + separator + block, "utf-8");
+}
+
+/** session.created: detect qmd, best-effort collection setup, warn once per session. */
+async function handleSessionCreated(sessionID: string) {
+	qmdAvailable = await detectQmd();
+	if (qmdAvailable) {
+		const hasCollection = await checkCollection("pi-memory");
+		if (!hasCollection) await setupQmdCollection();
+	}
+	if (!warnedSessions.has(sessionID)) {
+		warnedSessions.add(sessionID);
+		console.warn(`[oc2-memory] session ${sessionID}: qmd ${qmdAvailable ? "ready" : "unavailable"}`);
+	}
+}
+
+/**
+ * OpenCode V2 entry point. Registers the context/compaction hooks and starts
+ * the event subscription; returns a cleanup that clears the per-session cache
+ * and stops the subscription.
+ */
+export async function setup(ctx: Plugin.Context): Promise<Plugin.Cleanup> {
+	const controller = new AbortController();
+
+	await ctx.session.hook("context", (event) => {
+		event.system = upsertSnapshotPart(event.system, getSessionSnapshot(event.sessionID));
+	});
+
+	await ctx.session.hook("compaction", (event) => {
+		const section = buildHandoffSection();
+		if (!section) return;
+		const block = `${HANDOFF_SENTINEL}\n${section}`;
+		event.system = [...event.system, { type: "text", text: block }];
+		// Survives the session and stays searchable — but does not invalidate the
+		// snapshot: the handoff is a separate part, not the memory block.
+		appendHandoffToDaily(block);
+	});
+
+	const subscription = (async () => {
+		try {
+			for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+				if (event.type === "session.created") {
+					await handleSessionCreated(event.data.sessionID);
+				}
+			}
+		} catch {
+			// The stream closed or was aborted; cleanup owns the lifecycle.
+		}
+	})();
+
+	return async () => {
+		controller.abort();
+		sessionSnapshots.clear();
+		warnedSessions.clear();
+		await subscription.catch(() => {});
+	};
+}
+
+export default { id: "oc2-memory", setup } satisfies Plugin.Plugin;

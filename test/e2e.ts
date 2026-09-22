@@ -23,7 +23,7 @@
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import registerExtension, { _clearUpdateTimer } from "../index.js";
+import { _clearUpdateTimer, registerExtension } from "../index.js";
 
 // ---------------------------------------------------------------------------
 // Config
