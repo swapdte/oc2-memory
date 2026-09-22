@@ -10,7 +10,7 @@ oc2-memory is a port of **[pi-memory](https://github.com/jayzeng/pi-memory)** �
 
 The design is carried over deliberately and largely unchanged: the same markdown store, the same seven tools, the same KV-cache-stable snapshot. What changes is the platform underneath — pi's hook API is replaced by OpenCode's plugin SDK (`@opencode/plugin`), and the storage path is chosen so that an existing pi installation keeps working.
 
-**Port status: released.** `oc2-memory@0.1.0` is on npm — the seven tools, their JSON-Schema inputs, and the byte-stable snapshot all run on `@opencode/plugin` with no dependency on pi. Install it with `npx oc2-memory install` (see [Installation](#installation)).
+**Port status: released.** `oc2-memory@0.1.1` is on npm — the seven tools, their JSON-Schema inputs, and the byte-stable snapshot all run on `@opencode/plugin` with no dependency on pi. Install it with `npx oc2-memory install` (see [Installation](#installation)).
 
 ## Installation
 
