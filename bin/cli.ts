@@ -291,23 +291,34 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 			return 0;
 		}
 
-		console.log(USAGE);
-		return command ? 1 : 0;
+		console.error(USAGE);
+		return 1;
 	} catch (err) {
 		console.error(`oc2-memory: ${err instanceof Error ? err.message : String(err)}`);
 		return 1;
 	}
 }
 
-const isDirectRun = (() => {
+/**
+ * True when this module is the process entry point. Both sides are resolved
+ * through `realpath` because `node_modules/.bin/<name>` (and npx) start the CLI
+ * via a symlink — `path.resolve` alone would not match and the CLI would
+ * silently do nothing. Never throws; a missing argv1 yields false.
+ */
+export function isDirectRun(
+	argv1: string | undefined,
+	moduleUrl: string,
+	realpath: (p: string) => string = fs.realpathSync,
+): boolean {
+	if (!argv1) return false;
 	try {
-		return process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+		return realpath(argv1) === realpath(fileURLToPath(moduleUrl));
 	} catch {
 		return false;
 	}
-})();
+}
 
-if (isDirectRun) {
+if (isDirectRun(process.argv[1], import.meta.url)) {
 	main()
 		.then((code) => {
 			process.exitCode = code;

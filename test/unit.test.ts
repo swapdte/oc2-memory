@@ -10,8 +10,17 @@ import { afterEach, beforeEach, describe, expect, mock, setSystemTime, test } fr
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 
-import { addPluginEntry, readConfig, removePluginEntry, resolveConfigPath, writeConfig } from "../bin/cli.js";
+import {
+	addPluginEntry,
+	isDirectRun,
+	main,
+	readConfig,
+	removePluginEntry,
+	resolveConfigPath,
+	writeConfig,
+} from "../bin/cli.js";
 
 import {
 	_clearEmbedInFlight,
@@ -2280,5 +2289,74 @@ describe("installer CLI config helpers", () => {
 		fs.writeFileSync(configPath, "{ not json", "utf-8");
 		expect(() => readConfig(configPath)).toThrow();
 		expect(fs.readFileSync(configPath, "utf-8")).toBe("{ not json");
+	});
+});
+
+// ==========================================================================
+// 14. Installer CLI direct-run guard
+// ==========================================================================
+
+describe("installer CLI direct-run guard", () => {
+	let dir: string;
+	let real: string;
+
+	beforeEach(() => {
+		dir = fs.mkdtempSync(path.join(os.tmpdir(), "oc2-cli-run-"));
+		real = path.join(dir, "cli.js");
+		fs.writeFileSync(real, "// entry\n", "utf-8");
+	});
+
+	afterEach(() => {
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	// This is the `.bin`/npx case: `node_modules/.bin/oc2-memory` is a symlink to
+	// the real dist/cli.js, so a path.resolve comparison silently runs nothing.
+	test("detects a direct run through a symlink", () => {
+		const link = path.join(dir, "oc2-memory");
+		fs.symlinkSync(real, link);
+
+		expect(isDirectRun(link, pathToFileURL(real).href)).toBe(true);
+	});
+
+	test("detects a direct run of the real file", () => {
+		expect(isDirectRun(real, pathToFileURL(real).href)).toBe(true);
+	});
+
+	test("rejects a different entry file", () => {
+		const other = path.join(dir, "other.js");
+		fs.writeFileSync(other, "", "utf-8");
+
+		expect(isDirectRun(other, pathToFileURL(real).href)).toBe(false);
+	});
+
+	test("returns false for a missing argv1 or an unresolvable path", () => {
+		expect(isDirectRun(undefined, pathToFileURL(real).href)).toBe(false);
+		expect(isDirectRun(path.join(dir, "does-not-exist.js"), pathToFileURL(real).href)).toBe(false);
+	});
+
+	test("returns false when realpath throws", () => {
+		expect(
+			isDirectRun(real, pathToFileURL(real).href, () => {
+				throw new Error("boom");
+			}),
+		).toBe(false);
+	});
+});
+
+describe("installer CLI usage", () => {
+	test("unknown or missing command prints usage to stderr and exits non-zero", async () => {
+		const originalError = console.error;
+		const captured: string[] = [];
+		console.error = (...args: unknown[]) => {
+			captured.push(args.map(String).join(" "));
+		};
+		try {
+			expect(await main(["bogus"])).not.toBe(0);
+			expect(await main([])).not.toBe(0);
+		} finally {
+			console.error = originalError;
+		}
+		expect(captured.join("\n")).toContain("Usage: oc2-memory");
 	});
 });
