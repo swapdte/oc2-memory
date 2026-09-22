@@ -1,9 +1,5 @@
 # oc2-memory
 
-[![npm version](https://img.shields.io/npm/v/oc2-memory?color=cb3837&logo=npm)](https://www.npmjs.com/package/oc2-memory)
-[![npm downloads](https://img.shields.io/npm/dm/oc2-memory?color=cb3837&logo=npm)](https://www.npmjs.com/package/oc2-memory)
-[![license](https://img.shields.io/npm/l/oc2-memory)](LICENSE)
-
 **A memory plugin for [OpenCode](https://opencode.ai)** — durable facts, a daily log, and a scratchpad, all as plain markdown, with optional semantic search powered by [qmd](https://github.com/tobi/qmd).
 
 Your coding agent forgets everything between sessions. oc2-memory gives it a memory: durable facts and decisions, a running daily log, and a scratchpad of things to come back to — all as plain markdown files you can read, edit, and commit. With optional [qmd](https://github.com/tobi/qmd) it also gets keyword, semantic, and hybrid **search** across everything it has ever remembered.
