@@ -22,13 +22,16 @@
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { resolveActiveMemoryDir } from "../index.js";
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
 const EXTENSION_PATH = path.resolve(import.meta.dirname ?? __dirname, "..", "index.ts");
-const MEMORY_DIR = path.join(process.env.HOME ?? "~", ".pi", "agent", "memory");
+// Resolve through the plugin, so the tests touch the store the agent actually uses:
+// ~/.pi/agent/memory when it exists, otherwise the ~/.oc2-memory fallback.
+const MEMORY_DIR = resolveActiveMemoryDir();
 const MEMORY_FILE = path.join(MEMORY_DIR, "MEMORY.md");
 const SCRATCHPAD_FILE = path.join(MEMORY_DIR, "SCRATCHPAD.md");
 const DAILY_DIR = path.join(MEMORY_DIR, "daily");
