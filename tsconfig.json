@@ -9,5 +9,6 @@
 		"skipLibCheck": true,
 		"noEmit": true
 	},
-	"include": ["index.ts", "test/e2e.ts"]
+	"include": ["index.ts", "test/e2e.ts"],
+	"exclude": ["node_modules", "dist"]
 }

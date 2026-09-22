@@ -1,142 +1,92 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+An **OpenCode V2 plugin** that gives the coding agent a memory: durable facts, a daily log, and a
+scratchpad, all as plain markdown, with optional qmd-powered search. It is a port of
+[pi-memory](https://github.com/jayzeng/pi-memory) — a pi extension — onto OpenCode's V2 plugin SDK,
+`@opencode/plugin`.
 
-- `index.ts`: the entire pi extension (single-file, TypeScript loaded directly by `pi`)
-- `test/e2e.ts`: end-to-end tests that invoke `pi` as a subprocess
-- `README.md`: user-facing install/usage docs
-- `package.json`: metadata + **peer** dependencies (provided by the pi runtime)
+**The port is in progress.** `index.ts` still holds pi's implementation; the phase plan replaces it.
+Expect the current code, tests and CI to describe pi, not oc2-memory — including the
+`@earendil-works/pi-*` dependencies, which stay until that code is replaced.
 
-Runtime data lives outside the repo under `~/.pi/agent/memory/` (`MEMORY.md`, `SCRATCHPAD.md`, `daily/YYYY-MM-DD.md`).
+- `origin` → `swapdte/oc2-memory` (this project)
+- `upstream` → `jayzeng/pi-memory` (read-only source, for selective cherry-picks)
+- Author: swapdte · License: MIT — `LICENSE` carries both Jay Zeng (upstream) and Marc Kerkmann
 
-## Activity Tracking (Required)
+## Working docs
 
-- Track all work sessions by writing a short entry to the pi-memory daily log using `memory_write` (target: `daily`).
-- Summaries should include what changed, files touched, and any notable decisions.
-- Use the scratchpad tool for follow-ups or TODOs discovered during work.
+`DECISIONS.md` and `PLAN.md` are **gitignored** — they live in this checkout only, never in a fresh
+clone. `DECISIONS.md` records every settled technical decision; `PLAN.md` holds the phase plan and its
+gates. Read `DECISIONS.md` before making a design call and `PLAN.md` before starting a phase. Where
+this file and those two disagree about the port's target behaviour, they win.
 
-## Build, Test, and Development Commands
+## Layout
 
-- `pi -p -e ./index.ts "remember: I prefer dark mode"`: manual local run (print mode)
-- `pi install .` (or from the parent folder: `pi install ./pi-memory`): install the extension into pi
-- `npm test`: run the fast unit suite (`bun test test/unit.test.ts`; no API key, no qmd)
-- `npm run test:e2e` (or `npx tsx test/e2e.ts`): run E2E tests (requires `pi` on PATH + a configured API key)
-- `npm run test:eval`: run the recall-effectiveness eval (requires `pi` + API key + qmd)
-- `npm run build`: typecheck with `tsc` (`--noEmit`)
-- `npm run lint`: lint with Biome
-- Optional (for `memory_search`, requires Bun): `command -v qmd >/dev/null 2>&1 || bun install -g https://github.com/tobi/qmd`
-- Optional search setup: `qmd collection add ~/.pi/agent/memory --name pi-memory && qmd embed`
+- `index.ts` — the entire plugin in one source file. It is **built**, not loaded raw: OpenCode
+  resolves a plugin's entrypoints as module paths, so `tsup` bundles it to `dist/index.js`, which is
+  what `main` and `exports` point at. One source file, one artefact.
+- `test/` — `unit.test.ts` (fast, deterministic, no network), `e2e.ts` (spawns a real agent),
+  `eval-recall.ts` (recall A/B), `qmd-cache.ts`
+- `design.md` — upstream's rationale. Still the best account of *why* the design is what it is,
+  even where the naming says pi.
+- `CHANGELOG.md` — upstream history, kept for attribution
+- `.githooks/`, `scripts/postinstall.cjs` — dev-only commit hooks
+- `.github/workflows/` — CI, still pi-shaped; port it alongside the test commands
 
-## Coding Style & Naming Conventions
+Memory files live outside the repo — `~/.pi/agent/memory/`, falling back to `~/.oc2-memory/`.
 
-- Keep `index.ts` self-contained; avoid adding a build step unless absolutely necessary.
-- Match existing formatting: tabs for indentation, semicolons, and double quotes.
-- Naming: `camelCase` for functions, `PascalCase` for types, `SCREAMING_SNAKE_CASE` for constants; tool names remain `snake_case` (e.g. `memory_write`).
+## Commands
 
-## Testing Guidelines
+| Purpose | Command |
+| --- | --- |
+| Unit tests — no API key, no qmd | `npm test` |
+| Build to `dist/`, then typecheck | `npm run build` |
+| Lint and format | `npm run lint` |
+| End-to-end — real agent, needs an API key | `npm run test:e2e` |
+| Recall eval — agent + API key + qmd | `npm run test:eval` |
 
-- Enforce TDD for every behavior change: follow `red -> green -> refactor`.
-- Start by establishing a verifiable baseline: run the relevant existing tests before edits, and record the exact command + outcome in the PR/commit notes.
-- Add or update a failing test first that reproduces the bug or captures the new requirement; implement code only after the test fails for the expected reason.
-- Keep tests green after implementation and after any refactor; do not merge with skipped failing tests.
-- Every bug fix must include a regression test that fails before the fix and passes after it.
-- Tests touch `~/.pi/agent/memory/`; ensure backups/restores remain intact and new tests don’t leak user data.
-- Prefer behavior-focused assertions (tool availability, file contents, cross-session recall). Keep timeouts generous for model latency.
+Node ≥ 22 and Bun are required. Run `npm install` once after cloning: it is what points git at
+`.githooks`, so commits are unchecked until you do.
 
-## Commit & Pull Request Guidelines
+## Workflow
 
-- Use Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`) and keep messages imperative.
-- PRs: include a short summary, exact test command(s) run, and call out any changes to on-disk memory formats or `qmd` behavior.
+TDD on every change: write the failing test first, watch it fail **for the reason you expect**, then
+implement. A bug fix ships with a regression test that fails before it and passes after. Run the
+baseline before you start and leave the tree green after every step.
 
-## Security & Configuration Tips
+Tests read and write `~/.pi/agent/memory/`. Back it up and restore it; never leave a test's data behind.
 
-- Never commit real memory files or secrets. Tests assume `pi` is configured via environment (e.g. `OPENAI_API_KEY`).
+## Conventions
 
-## Tooling Rules
+- `biome.json` is the source of truth for formatting — run `npm run lint`.
+- `camelCase` functions, `PascalCase` types, `SCREAMING_SNAKE_CASE` constants. Tool names stay
+  `snake_case` (`memory_write`), because they are the public API.
+- Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`), imperative. No DCO sign-off.
+- Keep `index.ts` self-contained — one source file, one built artefact. `tsup` is the only build
+  step, and it exists because OpenCode loads a plugin by module path; prefer editing `index.ts` over
+  adding source files or more tooling.
 
-### 1. File discovery — use the `fff` MCP tools
+## Activity tracking
 
-Use the `fff` MCP tools for all file discovery and file search operations instead of shell commands or the default tools:
+Log every work session to the daily memory log with `memory_write` (`target: "daily"`): what changed,
+which files, which decisions. Use the scratchpad for follow-ups the session uncovers. The project
+dogfoods its own plugin — `memory_status` reports where the log actually lives.
 
-- `find_files` — find files by name, glob, or path prefix → **replaces `ls`, `find`, and `tree`**.
-- `grep` — search file contents for an identifier → replaces `grep` / `rg`.
-- `multi_grep` — OR-search several identifiers in one call.
+## Tooling
 
-Do not use `ls` or `find` to list or explore the filesystem; use `find_files` instead. Only fall back to a shell command when `fff` cannot express the operation.
+- **Finding files and code** — the `fff` MCP tools (`find_files`, `grep`, `multi_grep`) instead of
+  `ls`, `find`, or `rg`. Fall back to a shell command only where `fff` cannot express it.
+- **Library and API questions** — look them up, never guess. `context7` (`resolve-library-id`, then
+  `query-docs`) first for API syntax, configuration and current examples. `deepwiki`
+  (`read_wiki_structure` / `read_wiki_contents`) when `context7` has no coverage or the question is a
+  repository's internals, architecture or rationale. Prior knowledge only once both are exhausted or
+  the API is trivial and stable.
+- **Shell commands** — prefix with `rtk`, whose subcommands mirror the native tool: `rtk git status`,
+  `rtk npm install`, `rtk grep -i foo src/`. Meta commands stay bare: `rtk gain`, `rtk config`.
+  Check once per session with `rtk --version`; if that fails, or `which rtk` names "Rust Type Kit",
+  run native commands for the rest of the session.
 
-### 2. Library & API knowledge — `context7` first, then `deepwiki`
+## Security
 
-When the behavior, API, configuration, or usage of a library, framework, SDK, or CLI tool is unclear, do not guess — look it up. Use the MCP documentation servers in this order:
-
-1. **`context7` MCP** — resolve the library with `resolve-library-id`, then query it with `query-docs`. Preferred for concrete API syntax, setup/configuration, version-specific behavior, and current official examples.
-2. **`deepwiki` MCP** — if `context7` has no coverage, or the question is about a GitHub repository's architecture, internals, or design rationale, use `read_wiki_structure` / `read_wiki_contents`.
-
-Fall back to prior knowledge only when both sources are exhausted or the API is trivial and stable.
-
-### 3. Shell commands — always use `rtk`
-
-`rtk` is a token-optimized CLI proxy that filters and summarizes command output before it reaches the model context (up to ~90% fewer output tokens).
-
-> **Status:** rtk's automatic hook/plugin integration does **not** support OpenCode v2 yet. Until it does, the rules in this file are the mechanism — apply the `rtk` prefix manually on every command.
-
-**Rule:** whenever `rtk` is installed, run shell commands through its subcommands instead of the native binaries — for example `rtk git status` instead of `git status`.
-
-> Exception: for listing and locating files, the `fff` tools from section 1 take precedence over `rtk ls` / `rtk find`. Use the `rtk` wrappers for everything else and whenever a shell command is genuinely required.
-
-**Availability check (once per session):**
-
-```bash
-rtk --version 2>/dev/null || echo "rtk unavailable"
-```
-
-- Prints `rtk <version>` → `rtk` is available: use the `rtk` form for every command in the mapping below.
-- `command not found` or non-zero exit → fall back to the native commands for the rest of the session. Do not retry `rtk` on every call.
-
-#### Command mapping
-
-| Native                                  | Use instead            |
-| --------------------------------------- | ---------------------- |
-| `ls` *(prefer `fff find_files`)*        | `rtk ls`               |
-| `tree` *(prefer `fff find_files`)*      | `rtk tree`             |
-| `cat`, `head`, `tail`                   | `rtk read <file>`      |
-| `grep`                                  | `rtk grep <pattern>`   |
-| `rg`                                    | `rtk rg <pattern>`     |
-| `find` *(prefer `fff find_files`)*      | `rtk find`             |
-| `wc`                                    | `rtk wc`               |
-| `git …`                                 | `rtk git …`            |
-| `gh …`                                  | `rtk gh …`             |
-| `glab …`                                | `rtk glab …`           |
-| `docker …`                              | `rtk docker …`         |
-| `kubectl …`                             | `rtk kubectl …`        |
-| `npm …`                                 | `rtk npm …`            |
-| `npx …`                                 | `rtk npx …`            |
-| `pnpm …`                                | `rtk pnpm …`           |
-| `cargo …`                               | `rtk cargo …`          |
-| `tsc`                                   | `rtk tsc`              |
-| `eslint` / `lint`                       | `rtk lint`             |
-| `prettier`                              | `rtk prettier`         |
-| `jest`                                  | `rtk jest`             |
-| `vitest`                                | `rtk vitest`           |
-| `playwright`                            | `rtk playwright`       |
-| `next build`                            | `rtk next`             |
-| `prisma …`                              | `rtk prisma …`         |
-| `curl …`                                | `rtk curl …`           |
-| `wget …`                                | `rtk wget …`           |
-| `aws …`                                 | `rtk aws …`            |
-| `psql …`                                | `rtk psql …`           |
-| `dotnet …`                              | `rtk dotnet …`         |
-| any test runner (e.g. `cargo test`)     | `rtk test <cmd>`       |
-| any command, errors/warnings only       | `rtk err <cmd>`        |
-| any command, heuristic summary          | `rtk summary <cmd>`    |
-| any command, unfiltered                 | `rtk proxy <cmd>`      |
-
-#### Notes
-
-- `rtk` subcommands pass native flags through: `rtk ls -la`, `rtk grep -i -A 3 "foo" src/`, `rtk git diff --staged` all work.
-- For listing files or building a tree, prefer `fff find_files` (section 1). `rtk ls`, `rtk tree`, and `rtk find` are the shell fallback and proxy the native tools.
-- Meta/analytics commands are always called directly on `rtk`: `rtk gain`, `rtk gain --history`, `rtk discover`, `rtk config`.
-- If `rtk` filtering hides information you need (e.g. exact file contents with line numbers), re-run with the native command or `rtk read --level none -n`.
-- Do not wrap commands that `rtk` does not support. If no rtk subcommand exists, run the native command directly.
-- Do **not** rely on `rtk init --opencode`: the OpenCode hook/plugin is not supported on OpenCode v2 yet. Once support lands, the automatic rewrite can replace the manual prefixing described here.
-
-⚠️ **Name collision:** if `rtk gain` fails, a different `rtk` (reachingforthejack/rtk, "Rust Type Kit") may be on `PATH`. Verify with `which rtk`; if it is the wrong binary, fall back to the native commands.
+Never commit real memory files or secrets. Tests take credentials from the environment
+(`OPENAI_API_KEY`).

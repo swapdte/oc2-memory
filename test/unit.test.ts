@@ -127,32 +127,55 @@ function createShutdownCtx(options?: {
 }
 
 describe("runtime package scope", () => {
-	test("uses the official @earendil-works Pi packages", () => {
-		const source = fs.readFileSync(new URL("../index.ts", import.meta.url), "utf-8");
-		const claudeGuide = fs.readFileSync(new URL("../CLAUDE.md", import.meta.url), "utf-8");
-		const bunLock = fs.readFileSync(new URL("../bun.lock", import.meta.url), "utf-8");
+	test("declares the oc2-memory identity", () => {
 		const packageJson = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
+		const agentsGuide = fs.readFileSync(new URL("../AGENTS.md", import.meta.url), "utf-8");
+
+		expect(packageJson.name).toBe("oc2-memory");
+		expect(packageJson.type).toBe("module");
+		expect(packageJson.author).toBe("swapdte");
+		expect(packageJson.license).toBe("MIT");
+
+		// OpenCode resolves a plugin's entrypoints as module paths, so main/exports must point at
+		// the built artefact rather than at the TypeScript source.
+		expect(packageJson.main).toBe("./dist/index.js");
+		expect(packageJson.exports?.["."]).toBe("./dist/index.js");
+		expect(packageJson.exports?.["./server"]).toBe("./dist/index.js");
+		expect(packageJson.files).toContain("dist");
+
+		// Neither runtime has a manifest field for plugins: pi's was "pi", OpenCode has none.
+		expect(packageJson.pi).toBeUndefined();
+		expect(packageJson.opencode).toBeUndefined();
+
+		expect(packageJson.devDependencies["@opencode/plugin"]).toBe("2.0.2");
+		expect(packageJson.devDependencies.tsup).toBeDefined();
+		expect(packageJson.engines.node).toBe(">=22.19.0");
+
+		// The port is documented, and the docs name the upstream it was forked from.
+		expect(agentsGuide).toContain("https://github.com/jayzeng/pi-memory");
+	});
+
+	// index.ts still holds pi's implementation, so its runtime packages stay pinned until the port
+	// replaces that code. This also keeps the deprecated @mariozechner fork from creeping back in
+	// during the transition.
+	test("keeps the official pi packages pinned while the port is in progress", () => {
+		const packageJson = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
+		const source = fs.readFileSync(new URL("../index.ts", import.meta.url), "utf-8");
+		const bunLock = fs.readFileSync(new URL("../bun.lock", import.meta.url), "utf-8");
 
 		expect(source).toContain('from "@earendil-works/pi-ai"');
 		expect(source).toContain('from "@earendil-works/pi-coding-agent"');
-		expect(source).not.toContain("@mariozechner/pi-ai");
-		expect(source).not.toContain("@mariozechner/pi-coding-agent");
 
 		expect(packageJson.devDependencies["@earendil-works/pi-ai"]).toBe("0.84.1");
 		expect(packageJson.devDependencies["@earendil-works/pi-coding-agent"]).toBe("0.84.1");
 		expect(packageJson.peerDependencies["@earendil-works/pi-ai"]).toBe(">=0.81.1");
 		expect(packageJson.peerDependencies["@earendil-works/pi-coding-agent"]).toBe(">=0.81.1");
-		expect(packageJson.peerDependencies["@mariozechner/pi-ai"]).toBeUndefined();
-		expect(packageJson.peerDependencies["@mariozechner/pi-coding-agent"]).toBeUndefined();
 		expect(packageJson.peerDependencies["@sinclair/typebox"]).toBeUndefined();
-		expect(packageJson.engines.node).toBe(">=22.19.0");
 
-		expect(claudeGuide).toContain("https://github.com/earendil-works/pi");
-		expect(claudeGuide).not.toContain("https://github.com/mariozechner/pi-mono");
-		expect(claudeGuide).not.toContain("@mariozechner/pi-ai");
-		expect(claudeGuide).not.toContain("@mariozechner/pi-coding-agent");
-		expect(bunLock).not.toContain('"@mariozechner/pi-ai"');
-		expect(bunLock).not.toContain('"@mariozechner/pi-coding-agent"');
+		for (const text of [source, bunLock, JSON.stringify(packageJson)]) {
+			expect(text).not.toContain("@mariozechner/pi-ai");
+			expect(text).not.toContain("@mariozechner/pi-coding-agent");
+		}
 	});
 });
 
