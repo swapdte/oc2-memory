@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Running tests..."
-npm test
+if [ ! -d node_modules ]; then
+	echo "pre-commit: dependencies are not installed — run 'npm install'." >&2
+	exit 1
+fi
 
 echo "Running lint..."
 npm run lint
+
+echo "Typechecking..."
+npm run build
+
+# Tests are not wired in yet: the port has not landed its own suite. Add
+# `npm test` back here once test/ covers oc2-memory rather than pi-memory.

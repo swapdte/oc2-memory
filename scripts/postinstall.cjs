@@ -14,9 +14,9 @@ function isDevCheckout() {
 	return fs.existsSync(path.join(packageRoot, ".githooks"));
 }
 
-// Point git at the repo's tracked hooks (lint + tests on commit). Scoped to the
-// pi-memory working tree only — `git config` here writes to this repo's local
-// config, and we only reach this code in a dev checkout.
+// Point git at the repo's tracked hooks (lint + typecheck on commit). Scoped to
+// this working tree only — `git config` here writes to this repo's local config,
+// and we only reach this code in a dev checkout.
 function configureGitHooks() {
 	const insideRepo = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], {
 		cwd: packageRoot,
