@@ -9,7 +9,7 @@
 		"./server": "./dist/index.js"
 	},
 	"bin": {
-		"oc2-memory": "./dist/cli.js"
+		"oc2-memory": "dist/cli.js"
 	},
 	"license": "MIT",
 	"author": "swapdte",
