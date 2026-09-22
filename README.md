@@ -10,32 +10,11 @@ oc2-memory is a port of **[pi-memory](https://github.com/jayzeng/pi-memory)** �
 
 The design is carried over deliberately and largely unchanged: the same markdown store, the same seven tools, the same KV-cache-stable snapshot. What changes is the platform underneath — pi's hook API is replaced by OpenCode's plugin SDK (`@opencode/plugin`), and the storage path is chosen so that an existing pi installation keeps working.
 
-**Port status: implemented on OpenCode V2.** The seven tools, their JSON-Schema inputs, and the byte-stable snapshot all run on `@opencode/plugin` with no dependency on pi. What remains is packaging — an npm release and an `npx` installer CLI. See [Development](#development).
-
-## What it feels like
-
-```text
-# Session 1
-you   ▸ I always use pnpm in this repo, never npm. Remember that.
-agent ▸ Got it — saved to long-term memory.   (writes MEMORY.md)
-
-# …days later, brand new session…
-you   ▸ add prettier as a dev dependency
-agent ▸ pnpm add -D prettier
-        (recalled your package-manager preference from memory — no reminder needed)
-```
-
-Everything lives as markdown, so you can also just `cat` it:
-
-```bash
-$ cat ~/.pi/agent/memory/MEMORY.md
-<!-- 2026-06-07 10:12:03 [a1b2c3d4] -->
-#preference [[package-manager]] Always use pnpm in this repo, never npm.
-```
+**Port status: released.** `oc2-memory@0.1.0` is on npm — the seven tools, their JSON-Schema inputs, and the byte-stable snapshot all run on `@opencode/plugin` with no dependency on pi. Install it with `npx oc2-memory install` (see [Installation](#installation)).
 
 ## Installation
 
-Once the package is on npm, the installer CLI is the simplest path:
+The package is on npm — the installer CLI is the simplest path:
 
 ```bash
 npx oc2-memory install     # adds "oc2-memory" to your global OpenCode config
@@ -44,18 +23,6 @@ npx oc2-memory uninstall   # removes the entry (leaves OpenCode's npm cache alon
 ```
 
 `install` adds the package spec to the **`plugins`** array of your global OpenCode config (`~/.config/opencode/opencode.json`) and lets OpenCode fetch it into its own cache under `~/.cache/opencode/`. The write is atomic and `0600`, and a config file that fails to parse is never overwritten. `opencode plugin add oc2-memory` does the same thing if you prefer the host CLI.
-
-From a checkout, register the built directory instead — exactly the path `opencode plugin add` refuses:
-
-```bash
-npx oc2-memory install --local /absolute/path/to/oc2-memory
-```
-
-`--local` builds the checkout if `dist/` is missing or stale, then registers the absolute **`dist/`** directory in the config.
-
-> **A git specifier will not work.** `opencode plugin add github:swapdte/oc2-memory` fails with *"Plugin package has no server or TUI entrypoint"*. OpenCode installs with lifecycle scripts disabled, so nothing runs a build, and this repository does not commit `dist/`. A `prepare` script cannot fix that — the install never executes it. Use `npx oc2-memory install --local <dir>` instead.
-
-> **`opencode plugin add` refuses local paths.** OpenCode 2.x installs from an npm or git specifier only; `file:`, `./dir` and absolute paths are rejected. That is why the CLI writes the config itself.
 
 That's it — the seven core tools (`memory_write`, `memory_forget`, `memory_restore`, `memory_read`, `scratchpad`, `memory_search`, `memory_status`) work with no other setup.
 
@@ -176,7 +143,7 @@ In-progress context therefore survives compaction, and — because it is written
 - **qmd auto-setup**: on session start with qmd available, the collection and path contexts are created automatically.
 - **qmd re-indexing**: after every write, a debounced `qmd update` runs in the background (fire-and-forget, non-blocking) unless disabled via `PI_MEMORY_QMD_UPDATE`.
 - **qmd embeddings**: vectors for semantic/deep search are kept current automatically — `qmd embed` (incremental) runs after each re-index and as a catch-up at session start. Disabled together with re-indexing.
-- **Concurrent sessions**: sessions share one markdown store, so all disk mutations are serialised per file. Two sessions can safely write at the same time.
+- **Concurrent sessions**: sessions share one markdown store, and two sessions can safely write at the same time — not through a queue, but because every disk mutation is synchronous (`fs.writeFileSync`, never `appendFileSync`) with no `await` between reading and writing, so each read-modify-write is atomic within the server process. The one remaining, untested risk is a *second OpenCode server process* pointed at the same memory directory.
 - **Graceful degradation**: without qmd, the core tools work fully.
 
 ### Configuration
@@ -274,6 +241,8 @@ The public documentation at `opencode.ai/docs` still describes the legacy API an
 ## Publishing (maintainers)
 
 Releases are tag-driven. Pushing a `v*` tag runs the publish workflow, which lints, builds, runs the unit tests, verifies the tag matches `package.json`, and then publishes to npm.
+
+Publishing uses **trusted publishing** (OIDC): no `NPM_TOKEN` secret is needed, and npm generates the provenance automatically. The workflow declares `permissions: id-token: write` for that. Releases are therefore restricted to the GitHub Actions workflow — the tokenless path is the only one configured.
 
 ```bash
 npm version patch   # or minor / major — updates package.json
