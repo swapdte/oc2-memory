@@ -5,9 +5,10 @@ scratchpad, all as plain markdown, with optional qmd-powered search. It is a por
 [pi-memory](https://github.com/jayzeng/pi-memory) — a pi extension — onto OpenCode's V2 plugin SDK,
 `@opencode/plugin`.
 
-**The port is in progress.** `index.ts` still holds pi's implementation; the phase plan replaces it.
-Expect the current code, tests and CI to describe pi, not oc2-memory — including the
-`@earendil-works/pi-*` dependencies, which stay until that code is replaced.
+**The port is complete on OpenCode V2.** Phases 0–3 are done: `index.ts` is a pure V2 plugin — the
+seven tools with JSON-Schema inputs, the byte-stable snapshot, and the compaction handoff — with
+**no** `@earendil-works/pi-*` dependency. Outstanding: Phase 4 (configuration and docs), Phase 5
+(release), and Phase 6 (the `npx` installer CLI). See `PLAN.md`.
 
 - `origin` → `swapdte/oc2-memory` (this project)
 - `upstream` → `jayzeng/pi-memory` (read-only source, for selective cherry-picks)
@@ -15,10 +16,11 @@ Expect the current code, tests and CI to describe pi, not oc2-memory — includi
 
 ## Working docs
 
-`DECISIONS.md` and `PLAN.md` are **gitignored** — they live in this checkout only, never in a fresh
-clone. `DECISIONS.md` records every settled technical decision; `PLAN.md` holds the phase plan and its
-gates. Read `DECISIONS.md` before making a design call and `PLAN.md` before starting a phase. Where
-this file and those two disagree about the port's target behaviour, they win.
+`DECISIONS.md` and `PLAN.md` are **committed** and written in **German** — the language they were
+drafted in — while the rest of the repository is English. `DECISIONS.md` records every settled
+technical decision; `PLAN.md` holds the phase plan and its gates. Read `DECISIONS.md` before making
+a design call and `PLAN.md` before starting a phase. Where this file and those two disagree about the
+port's target behaviour, they win.
 
 ## Layout
 
@@ -31,7 +33,8 @@ this file and those two disagree about the port's target behaviour, they win.
   even where the naming says pi.
 - `CHANGELOG.md` — upstream history, kept for attribution
 - `.githooks/`, `scripts/postinstall.cjs` — dev-only commit hooks
-- `.github/workflows/` — CI, still pi-shaped; port it alongside the test commands
+- `.github/workflows/` — CI (lint, build, unit tests, publish) plus the Windows qmd smoke test; all
+  run against the V2 plugin
 
 Memory files live outside the repo — `~/.pi/agent/memory/`, falling back to `~/.oc2-memory/`.
 
@@ -54,7 +57,8 @@ TDD on every change: write the failing test first, watch it fail **for the reaso
 implement. A bug fix ships with a regression test that fails before it and passes after. Run the
 baseline before you start and leave the tree green after every step.
 
-Tests read and write `~/.pi/agent/memory/`. Back it up and restore it; never leave a test's data behind.
+Unit tests use per-test temp directories and never touch the real memory store; `npm run test:e2e`
+uses the active memory directory. Back it up and restore it; never leave a test's data behind.
 
 ## Conventions
 
@@ -65,6 +69,8 @@ Tests read and write `~/.pi/agent/memory/`. Back it up and restore it; never lea
 - Keep `index.ts` self-contained — one source file, one built artefact. `tsup` is the only build
   step, and it exists because OpenCode loads a plugin by module path; prefer editing `index.ts` over
   adding source files or more tooling.
+- `@opencode/plugin@2.0.2` is a **devDependency** (used for types only). The plugin has no runtime
+  dependencies, and there are no `@earendil-works/pi-*` packages left.
 
 ## Activity tracking
 

@@ -1500,6 +1500,12 @@ describe("memory_status tool", () => {
 		expect(result.details.qmd).toBe(false);
 		expect(result.details.longTermChars).toBeGreaterThan(0);
 	});
+
+	test("does not advertise the removed PI_MEMORY_SNAPSHOT knob", async () => {
+		const result = await tools.memory_status.execute("c1", {}, null, null, {});
+		expect(result.content[0].text).not.toContain("PI_MEMORY_SNAPSHOT");
+		expect(result.details.snapshotMode).toBeUndefined();
+	});
 });
 
 // ==========================================================================

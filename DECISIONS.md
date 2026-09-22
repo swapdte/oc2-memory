@@ -101,9 +101,9 @@ Klar, versioniert, kollidiert weder mit `pi` noch mit anderen Systemen.
   (`"primary" | "compaction" | "title" | "generate"`) eine erstklassige Unterscheidung.
   Auxiliary-Requests haben **eigene Hooks** (`title`, `generate`, `compaction`). Der Guard
   ist damit strukturell: **nur `context` registrieren**, nichts in `title`/`generate` injizieren.
-  → **Offen zu verifizieren (Phase 2):** ob der `context`-Hook auch für `kind ≠ "primary"`
-  feuert. Falls ja, muss zusätzlich auf das Kind-Feld gegated werden. Das ist ein Gate-Punkt,
-  keine Annahme.
+  → **Erledigt (Phase 2/3):** Es wird ausschließlich `context` registriert; Titel-,
+  Summary- und Generate-Requests haben eigene Hooks (`title`/`generate`/`compaction`),
+  in die nichts injiziert wird. Ein Kind-Gate ist damit nicht nötig.
 - **`per-turn` wird gestrichen.** Kein „Pro-Prompt-Top-3-Search-Injection“-Modus.
 - Begründung:
   - pi empfiehlt `stable` selbst als Default; Nutzen von `per-turn` (automatisches Recall)
@@ -132,8 +132,16 @@ Klar, versioniert, kollidiert weder mit `pi` noch mit anderen Systemen.
   agent-agnostisch (Datei-/qmd-Arbeit).
 - **Registrierung (V2):** `ctx.tool.transform(editor => editor.add({ … }))`.
   `input` akzeptiert **JSON Schema nativ** (kein Zod-Zwang wie in V1).
-  `execute(input, context)` mit `context: { sessionID, agent, messageID, id, progress }`;
-  Rückgabe `{ content }` bzw. `Tool.Result`.
+  `execute(input, context)` mit `context: { sessionID, agent, messageID, id, progress }`.
+- **Umsetzung (Phase 3):** Die sieben Definitionen liegen als **`MEMORY_TOOLS`** vor
+  (host-agnostisch, interner Rückgabewert `{ content, isError?, details }`) und werden
+  erst am V2-Rand über `toOpenCodeTool` auf `Tool.Result` abgebildet: `content` als
+  **String**, `details` als `metadata`; `isError` wird als ablehnendes Promise signalisiert
+  (der Promise-Adapter macht daraus einen Tool-Fehler). Die aus dem SDK abgeleiteten
+  Typen (`ToolEditor`, `OpenCodeTool`) halten die Abbildung typgeprüft.
+- **pi-Oberfläche entfernt (Phase 3):** kein `registerExtension`/`pi.registerTool`/`pi.on`,
+  kein `@earendil-works/*` mehr — weder als Wert noch als Typ; `dist/index.js` enthält keine
+  pi-Referenz.
 
 ### 8. Repo-Strategie & Lizenz
 `entschieden`
@@ -168,6 +176,9 @@ Klar, versioniert, kollidiert weder mit `pi` noch mit anderen Systemen.
   Nicht auf `define()` allein verlassen — der Host konsumiert die **Objektform**; codemem
   ruft `define()` gar nicht auf.
 - **Dependency:** `@opencode/plugin@2.0.2` als **devDependency** (nur Typen).
+- **Ergänzung (Phase 3):** Die ursprünglich übergangsweise beibehaltenen
+  `@earendil-works/pi-*`-Deps (dev + peer) sind entfernt; das Paket hat keine
+  Runtime-Abhängigkeiten mehr.
 - **Konsequenz:** `AGENTS.md` („kein Build-Step“) und `tsconfig.json` (`noEmit`) müssen
   angepasst werden; die `.github/workflows` bauen künftig vor dem Veröffentlichen.
 
@@ -273,9 +284,10 @@ Klar, versioniert, kollidiert weder mit `pi` noch mit anderen Systemen.
     Nur ein **TUI**-Modul hätte `context.toast.show({ message, variant })` — und ein
     TUI-Modul ist Non-Goal.
   - **Ersatz:** einmal pro Session `console.warn("[oc2-memory] snapshot loaded (<N> bytes) → <pfad>")`
-    (genau dcps Degradationspfad; landet im CLI-stderr/dev-Log), plus ein **ausgebauter
-    `memory_status`**, der den Snapshot-Zustand mitberichtet (geladen/stale, Byte-Größe,
-    letzter Refresh, Dirty-Flag) und die Doctor-Rolle vollständig übernimmt.
+    (genau dcps Degradationspfad; landet im CLI-stderr/dev-Log), plus ein **`memory_status`**,
+    der Pfade, qmd, Collection, Embeddings und die aktive Konfiguration berichtet und die
+    Doctor-Rolle übernimmt. Einen Snapshot-Modus meldet es nicht mehr — der V2-Hook ist per
+    Design immer byte-stabil, `PI_MEMORY_SNAPSHOT` wurde in Phase 4 entfernt.
 - **Exit-Summary + Ctrl+D-Erkennung: gestrichen.**
   - Serverseitig existiert **kein** Quit/Shutdown-Event (pis `session_shutdown` fehlt).
     Kandidaten wären `session.idle` (feuert nach *jeder* Runde — falscher Trigger) oder

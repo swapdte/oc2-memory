@@ -1301,17 +1301,6 @@ export function getMemoryInventory(): {
 // emit the same bytes for every turn in between.
 // ---------------------------------------------------------------------------
 
-/**
- * Snapshot mode configuration (PI_MEMORY_SNAPSHOT). Kept for Phase 4 — the V2
- * snapshot cache that consumes it lives further down.
- */
-function getSnapshotMode(): "stable" | "refresh" | "per-turn" {
-	const mode = (process.env.PI_MEMORY_SNAPSHOT ?? "stable").toLowerCase();
-	if (mode === "per-turn") return "per-turn";
-	if (mode === "refresh") return "refresh";
-	return "stable";
-}
-
 // ---------------------------------------------------------------------------
 // Memory tools
 //
@@ -2119,7 +2108,6 @@ export const MEMORY_TOOLS: MemoryToolDefinition[] = [
 			lines.push(
 				"",
 				"## Configuration",
-				`- PI_MEMORY_SNAPSHOT: ${getSnapshotMode()}`,
 				`- PI_MEMORY_QMD_UPDATE: ${getQmdUpdateMode()}`,
 				`- PI_MEMORY_QMD_SEARCH_TIMEOUT_MS: ${getQmdSearchTimeoutMs()}`,
 				`- PI_MEMORY_EMBED_PROBE_TIMEOUT_MS: ${getEmbedProbeTimeoutMs()}`,
@@ -2133,7 +2121,6 @@ export const MEMORY_TOOLS: MemoryToolDefinition[] = [
 					qmd: qmdOk,
 					collection: collectionOk,
 					embeddings,
-					snapshotMode: getSnapshotMode(),
 					qmdUpdateMode: getQmdUpdateMode(),
 				},
 			};

@@ -7,8 +7,10 @@ Port von [pi-memory](https://github.com/jayzeng/pi-memory) als **Opencode-V2-Plu
 - Vorgehen: TDD (red → green → refactor), siehe `AGENTS.md`.
 - **Ziel-API: `@opencode/plugin@2.0.2` (V2).** Kein V1-Fallback. Siehe `DECISIONS.md` → API-Lage.
 
-**Aktuelle Phase: 1.** Phase 0 ist abgeschlossen (Commits `7143882`, `b4cbe77`; Gate erfüllt,
-`npm test` 198/198 grün). Phase 1 ist noch nicht begonnen.
+**Aktuelle Phase: 5 (Release).** Phase 0–4 sind abgeschlossen. Der Port ist auf V2 vollständig:
+`index.ts` ist ein reines V2-Plugin **ohne** `@earendil-works/pi-*`-Abhängigkeit, `npm test`
+186/186 grün, `dist/index.js` enthält keine pi-Referenz. Als Nächstes: Release (Phase 5) und
+Installer-CLI (Phase 6).
 
 ---
 
@@ -48,6 +50,8 @@ V1-`server`-Fallback, Toast-Benachrichtigung. Siehe `DECISIONS.md` §5/§9/§O3.
   - Scripts: `build` = tsup **und** `tsc --noEmit`, `lint`, `test`, `test:e2e`, `test:eval`
   - Abweichung vom Plan: die `@earendil-works/pi-*`-Deps **bleiben** (dev + peer), weil
     `index.ts` und die Tests sie noch brauchen — sie fallen erst mit dem Port in Phase 3.
+    → **In Phase 3 erledigt:** beide Deps aus dev- und peerDependencies entfernt
+    (inkl. Lockfiles); `index.ts` enthält kein `@earendil-works` mehr.
 - [x] `tsconfig.json`: `noEmit` bleibt für den Typecheck; `dist` wird ausgeschlossen
       (via `exclude`, nicht `include`).
 - [x] `README.md` auf oc2-memory umschreiben — **erklärt die Portierung auf die
@@ -55,9 +59,10 @@ V1-`server`-Fallback, Toast-Benachrichtigung. Siehe `DECISIONS.md` §5/§9/§O3.
       `opencode plugin add oc2-memory` (später; bis dahin git-Spec).
 - [x] `AGENTS.md`: „kein Build-Step“-Konvention angepasst (`tsup` ist die Ausnahme);
       Ziel-API auf V2, `npm install`-Hinweis bleibt.
-- [ ] `.github/workflows/`: **bewusst zurückgestellt.** `ci.yml`, `publish-npm.yml` und
-      `e2e.yml` funktionieren unverändert, weil die pi-Deps bleiben; `windows-qmd-smoke.yml`
-      testet pi-spezifische Helfer und wandert mit dem Port (Phase 3/4).
+- [x] `.github/workflows/`: `ci.yml`, `publish-npm.yml` und `e2e.yml` funktionieren unverändert;
+      `windows-qmd-smoke.yml` prueft jetzt den echten V2-Port-Vertrag (`resolveMemoryDir` pur,
+      `resolveActiveMemoryDir`-Fallback, `ensureDirs`/`dailyPath` via `_setBaseDir(tmp)`) und
+      nicht mehr den unbedingten pi-Pfad.
 - **Gate — erfüllt:** `git log` zeigt pi-History, `origin` zeigt swapdte/oc2-memory,
   `npm run build` läuft; zusätzlich `npm test` 198/198 grün.
 
@@ -68,9 +73,9 @@ gelöschte `CLAUDE.md`; er prüft jetzt die oc2-memory-Identität.
 
 ### Phase 1 — Kern (Datei-Hooks, Pfad, qmd)
 Port aus `index.ts`:
-- [ ] `resolveMemoryDir`/Pfad-Fallback: `PI_MEMORY_DIR` → `~/.pi/agent/memory/`
+- [x] `resolveMemoryDir`/Pfad-Fallback: `PI_MEMORY_DIR` → `~/.pi/agent/memory/`
       (nur Basisordner-Existenz) → `~/.oc2-memory/`; einmal erkennen, cachen.
-- [ ] Datei-Utilities: `ensureDirs`, `readFileSafe`, `todayStr`/`yesterdayStr`,
+- [x] Datei-Utilities: `ensureDirs`, `readFileSafe`, `todayStr`/`yesterdayStr`,
       `nowTimestamp`, `shortSessionId` (unverändert übernehmen).
 - ~~**Serialisierungs-Queue** (`Map<string, Promise>`) um alle Diskmutationen und
   Snapshot-Builds (`DECISIONS.md` §10)~~ — **in Phase 1 als gegenstandslos verworfen.**
@@ -79,59 +84,66 @@ Port aus `index.ts`:
   Read-Modify-Write ist damit in-process atomar. Siehe `DECISIONS.md` §10, inklusive der
   noch offenen Detailprüfung der übrigen Write-Stellen. **Regel bleibt: kein `await`
   zwischen Lesen und Schreiben.**
-- [ ] qmd-Wrapper: `detectQmd`, `checkCollection`, `setupQmdCollection`,
+- [x] qmd-Wrapper: `detectQmd`, `checkCollection`, `setupQmdCollection`,
       `search`, `update`, `embed` (Shell-Out an qmd bleibt identisch).
       Fehlendes qmd → sauberer Markdown/Grep-Fallback, kein Fehler.
 - **Gate:** `bun test` (Unit-Tests auf die portierten Utilities; Backups/Restores intakt).
 
 ### Phase 2 — Plugin-Gerüst + Injection
-- [ ] Server-Plugin-Modul: Default-Export `{ id: "oc2-memory", setup }` (plus benannter
+- [x] Server-Plugin-Modul: Default-Export `{ id: "oc2-memory", setup }` (plus benannter
       `setup`); `setup(ctx)` registriert alle Hooks und gibt ein Cleanup zurück,
       das die Maps leert.
-- [ ] `ctx.session.hook("context", …)`:
+- [x] `ctx.session.hook("context", …)`:
   - Snapshot beim ersten Feuern pro `sessionID` bauen (MEMORY + Scratchpad +
     heute + gestern; Längen-Caps wie pi, MEMORY.md mittig gekürzt).
   - Block trägt eine **Sentinel-Zeile**; bei jedem Feuern in `event.system` suchen,
     gefunden → in place ersetzen, sonst anhängen; `event.system` neu zuweisen.
-  - Cache `Map<sessionID, {snapshot, part, dayKey, dirty}>`; Re-Build **nur** bei
+  - Cache `Map<sessionID, {block, dayKey, dirty}>`; Re-Build **nur** bei
     Dirty-Flag oder Tageswechsel.
   - **keine Zeitstempel im Block** (Byte-Stabilität).
-  - **Gate-Punkt (empirisch):** feuert `context` auch für `kind ≠ "primary"`
-    (Titel-Generator, Summarizer)? Falls ja, auf das Kind-Feld gaten. Erst messen,
-    dann entscheiden — nicht annehmen.
-- [ ] `ctx.event.subscribe({ signal })`: `session.created` → qmd-Detect/-Setup +
+  - **Gate-Punkt (empirisch):** `context` wird **nur** registriert; Titel-/Summary-/
+    Generate-Requests haben eigene Hooks (`title`/`generate`/`compaction`), es wird
+    nichts dorthin injiziert.
+- [x] `ctx.event.subscribe({ signal })`: `session.created` → qmd-Detect/-Setup +
       Snapshot-Init; einmal pro Session `console.warn("[oc2-memory] …")`.
-- [ ] `ctx.session.hook("compaction", …)` → Handoff als System-Part anhängen
+- [x] `ctx.session.hook("compaction", …)` → Handoff als System-Part anhängen
       (Header + offene Scratchpad-Items + Tages-Tail, eigener Cap); zusätzlich
       Handoff-Block in die Tagesdatei persistieren. **`result` nicht setzen.**
       Handoff-Write setzt **nicht** das Dirty-Flag.
-- **Gate:** manuell `opencode` starten → Speicherblock erscheint im Kontext;
-  `memory_write` (daily) ändert den Block **nicht** (byte-stabil); Block erscheint
-  auch bei wiederholten Anfragen **nur einmal** (Sentinel-Idempotenz).
+- **Gate — erfüllt:** Unit-Tests decken Block-Anhängen/-Ersetzen, Byte-Stabilität,
+  Dirty-Rebuild, Tageswechsel und Compaction-Handoff ab (`V2 setup`-Suite).
 
 ### Phase 3 — Tools portieren (TDD)
 Reihenfolge nach Abhängigkeit, je Tool rote Tests zuerst:
-- [ ] `memory_write` (long_term/daily, append/overwrite)
-- [ ] `memory_read` (Dateien + `list` der Tageslogs)
-- [ ] `scratchpad` (add/done/undo/clear/list)
-- [ ] `memory_forget` + `memory_restore` (recovery-`<id>.json`), setzt Dirty-Flag
+- [x] `memory_write` (long_term/daily, append/overwrite)
+- [x] `memory_read` (Dateien + `list` der Tageslogs)
+- [x] `scratchpad` (add/done/undo/clear/list)
+- [x] `memory_forget` + `memory_restore` (recovery-`<id>.json`), setzt Dirty-Flag
       für **alle** lebenden Sessions
-- [ ] `memory_search` (qmd keyword/semantic/deep; Markdown-Fallback als Default)
-- [ ] `memory_status` (Doctor: Pfade, qmd, Collection, Embeddings, Konfig
-      **+ Snapshot-Zustand**: geladen/stale, Byte-Größe, letzter Refresh, Dirty-Flag)
-- [ ] Registrierung via `ctx.tool.transform(editor => editor.add({ name, description,
-      input: <JSON Schema>, execute }))`; `execute`-Rückgabe `{ content }` / `Tool.Result`.
-- **Gate:** alle Unit-/E2E-Tests grün; Tool-Verhalten identisch zu pi (Files,
-  Cross-Session-Recall).
+- [x] `memory_search` (qmd keyword/semantic/deep; Markdown-Fallback als Default)
+- [x] `memory_status` (Doctor: Pfade, qmd, Collection, Embeddings, aktive Konfig)
+- [x] Registrierung via `ctx.tool.transform(editor => editor.add({ name, description,
+      input: <JSON Schema>, execute }))`; die sieben Definitionen sind als
+      `MEMORY_TOOLS` exportiert, `execute` liefert intern `{ content, isError?, details }`
+      und wird erst am V2-Rand via `toOpenCodeTool` auf `Tool.Result`
+      (`content: string`, `metadata`) abgebildet.
+- [x] pi-Oberfläche vollständig entfernt: `registerExtension`, alle `pi.registerTool`/
+      `pi.on`-Aufrufe, der `ExtensionAPI`-Import und die komplette Exit-Summary
+      (`complete`/`convertToLlm`/`serializeConversation`, `PI_MEMORY_EXIT_SUMMARY*`).
+      `package.json` frei von `@earendil-works/pi-*`; `dist/index.js` ohne pi-Referenz.
+- **Gate — erfüllt:** alle Unit-Tests grün; kein `@earendil-works` in `index.ts`,
+  `package.json` oder `dist/index.js`.
 
 ### Phase 4 — Konfig & Doku
-- [ ] Env-Vars übernehmen/reduzieren (nur nötige: `PI_MEMORY_DIR`,
-      `PI_MEMORY_QMD_UPDATE`, Timeouts; `per-turn`/Exit-Summary-Vars entfallen).
-- [ ] `README.md` final: Install, Tools, Datei-Layout, Troubleshooting, Konfig,
+- [x] Env-Vars reduziert: nur `PI_MEMORY_DIR`, `PI_MEMORY_QMD_UPDATE`,
+      `PI_MEMORY_QMD_SEARCH_TIMEOUT_MS`, `PI_MEMORY_EMBED_PROBE_TIMEOUT_MS`.
+      `PI_MEMORY_SNAPSHOT` (inkl. `getSnapshotMode()`) entfernt — der V2-`context`-Hook
+      ist per Design immer byte-stabil; `per-turn`/`refresh` steuern nichts mehr.
+- [x] `README.md` final: Install, Tools, Datei-Layout, Troubleshooting, Konfig,
       **Autoren-Abschnitt** (swapdte + Jay Zeng), Portierungs-Hinweis.
-- [ ] `AGENTS.md` final gegen den echten Stand abgleichen (Build-Step, V2-API,
-      Test-Kommandos).
-- [ ] `DECISIONS.md` + `PLAN.md` ins Repo committen.
+- [x] `AGENTS.md` final gegen den echten Stand abgleichen (Build-Step, V2-API,
+      Test-Kommandos, Doku-Status).
+- [x] `DECISIONS.md` + `PLAN.md` ins Repo committen (deutsch; Status auf Phase 5).
 
 ### Phase 5 — Release
 - [ ] `npm run build` (tsup + Typecheck) + `lint` grün.
@@ -185,11 +197,12 @@ zum Doppelwesen wie `oh-my-opencode-slim` — `main` = Plugin, `bin` = CLI.
   ordnungsabhängige Ausgabe im Snapshot; nur Dirty-Flag/Tageswechsel rebuildet.
   Ehrliche Reichweite: nur *unser* Beitrag ist byte-konstant, nicht der ganze Prefix.
 - **Doppel-Injection** — der `context`-Hook feuert pro Anfrage; ohne Sentinel-Prüfung
-  landen N Kopien im Prompt.
-- **Interne Aufrufe** — prüfen, ob `context` auch für nicht-`primary`-Requests feuert
-  (Phase-2-Gate); sonst Leak in Titel-/Summary-Prompts.
-- **Nebenläufigkeit** — viele Sessions, gemeinsame Tagesdatei: alle Diskmutationen
-  durch die Queue (§10).
+  landen N Kopien im Prompt. Abgedeckt durch Unit-Tests (genau ein Sentinel).
+- **Interne Aufrufe** — `context` wird nur registriert; Titel-/Summary-/Generate-Requests
+  haben eigene Hooks → kein Leak in deren Prompts (Phase-2-Gate erledigt).
+- **Nebenläufigkeit** — viele Sessions, gemeinsame Tagesdatei: alle Diskmutationen sind
+  synchron und ohne `await` zwischen Lesen und Schreiben; die in §10 verworfene Queue ist
+  gegenstandslos.
 - **Globaler Speicher, Session-Cache** — `memory_forget`/`memory_restore` müssen
   **jede** lebende Session invalidieren, nicht nur die aufrufende.
 - **qmd nicht überall** — Collection `pi-memory` fehlt auf frischen Installationen;

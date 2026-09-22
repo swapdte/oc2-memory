@@ -10,7 +10,7 @@ oc2-memory is a port of **[pi-memory](https://github.com/jayzeng/pi-memory)** �
 
 The design is carried over deliberately and largely unchanged: the same markdown store, the same seven tools, the same KV-cache-stable snapshot. What changes is the platform underneath — pi's hook API is replaced by OpenCode's plugin SDK (`@opencode/plugin`), and the storage path is chosen so that an existing pi installation keeps working.
 
-**Port status: in progress.** The tool implementations are still being moved across, so the behaviour below describes the target, not a finished plugin. See [Development](#development).
+**Port status: implemented on OpenCode V2.** The seven tools, their JSON-Schema inputs, and the byte-stable snapshot all run on `@opencode/plugin` with no dependency on pi. What remains is packaging — an npm release and an `npx` installer CLI. See [Development](#development).
 
 ## What it feels like
 
@@ -78,7 +78,7 @@ qmd embed
 | `memory_read` | Read any memory file, or list the daily logs |
 | `scratchpad` | Add / done / undo / clear / list checklist items |
 | `memory_search` | Search across all memory files (qmd-backed when available, keyword fallback otherwise) |
-| `memory_status` | Health check: where files live, snapshot state, qmd / collection / embeddings, active config |
+| `memory_status` | Health check: where files live, qmd / collection / embeddings, active config |
 
 ### memory_search modes
 
@@ -179,11 +179,11 @@ In-progress context therefore survives compaction, and — because it is written
 
 The environment-variable name keeps the `PI_` prefix on purpose: the same variable configures a pi installation and an OpenCode one over the same memory files.
 
-**Not carried over.** pi-memory's `PI_MEMORY_SNAPSHOT` (`refresh` / `per-turn`), `PI_MEMORY_NO_SEARCH`, and the `PI_MEMORY_EXIT_SUMMARY*` group configure features this port deliberately drops — see the non-goals below.
+**Not carried over.** pi-memory's `PI_MEMORY_SNAPSHOT` (`refresh` / `per-turn`), `PI_MEMORY_NO_SEARCH`, and the `PI_MEMORY_EXIT_SUMMARY*` group are not read by this port: the snapshot is always byte-stable for the session and search is always on demand, so these variables have no effect here — see the non-goals below.
 
 ## Troubleshooting
 
-Run `memory_status` first — it reports most of these at a glance, including the storage path and snapshot state.
+Run `memory_status` first — it reports most of these at a glance, including the storage path and the active configuration.
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
@@ -224,7 +224,7 @@ To run a local build, add the **built directory** to the `plugins` array of `~/.
 { "plugins": ["/absolute/path/to/oc2-memory/dist"] }
 ```
 
-The path must be a **directory**; a bare file is ignored with a warning. Inside it OpenCode looks for `server.*` then `index.*` and does not consult `package.json`, so point it at `dist/` and never at the repository root — the root `index.ts` is the source file, and during the port it still holds pi-memory's implementation. Alternatively, copy the built `dist/index.js` into `~/.config/opencode/plugins/`, which OpenCode scans for `.js` and `.ts` files.
+The path must be a **directory**; a bare file is ignored with a warning. Inside it OpenCode looks for `server.*` then `index.*` and does not consult `package.json`, so point it at `dist/` and never at the repository root — the root `index.ts` is the source file, not the built entrypoint. Alternatively, copy the built `dist/index.js` into `~/.config/opencode/plugins/`, which OpenCode scans for `.js` and `.ts` files.
 
 ```bash
 npm test             # fast unit suite: no API key, no qmd
