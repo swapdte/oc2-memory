@@ -14,8 +14,10 @@ import * as path from "node:path";
 import {
 	_clearEmbedInFlight,
 	_clearUpdateTimer,
+	_getActiveMemoryDir,
 	_getEmbedInFlight,
 	_getUpdateTimer,
+	_resetActiveMemoryDir,
 	_resetBaseDir,
 	_resetExecFileForTest,
 	_resetMemorySnapshot,
@@ -43,6 +45,8 @@ import {
 	qmdCollectionInstructions,
 	qmdInstallInstructions,
 	readFileSafe,
+	resolveActiveMemoryDir,
+	resolveHomeDir,
 	resolveMemoryDir,
 	resolveQmdJsPath,
 	runQmdSearch,
@@ -51,6 +55,7 @@ import {
 	scratchpadAdd,
 	scratchpadClearDone,
 	scratchpadToggle,
+	searchMemoryMarkdown,
 	serializeScratchpad,
 	shortSessionId,
 	todayStr,
@@ -290,6 +295,83 @@ describe("resolveMemoryDir", () => {
 		};
 
 		expect(resolveMemoryDir(env)).toBe(path.join(env.USERPROFILE, ".pi", "agent", "memory"));
+	});
+});
+
+describe("resolveHomeDir", () => {
+	test("prefers HOME over the other home variables", () => {
+		const env = {
+			HOME: path.join("home", "user"),
+			USERPROFILE: path.join("Users", "other"),
+			HOMEDRIVE: "C:",
+			HOMEPATH: "\\Users\\drive",
+		};
+
+		expect(resolveHomeDir(env)).toBe(env.HOME);
+	});
+
+	test("joins HOMEDRIVE and HOMEPATH when HOME and USERPROFILE are unset", () => {
+		const env = { HOMEDRIVE: "C:", HOMEPATH: "\\Users\\drive" };
+
+		expect(resolveHomeDir(env)).toBe("C:\\Users\\drive");
+	});
+
+	test("falls back to the literal ~ when nothing is set", () => {
+		expect(resolveHomeDir({})).toBe("~");
+	});
+});
+
+describe("resolveActiveMemoryDir", () => {
+	afterEach(() => {
+		_resetActiveMemoryDir();
+	});
+
+	test("prefers PI_MEMORY_DIR even when the pi folder exists", () => {
+		const env = {
+			PI_MEMORY_DIR: path.join("custom", "memory"),
+			HOME: path.join("home", "user"),
+		};
+
+		expect(resolveActiveMemoryDir(env, () => true)).toBe(env.PI_MEMORY_DIR);
+	});
+
+	test("returns the pi path when the pi folder exists", () => {
+		const env = { HOME: path.join("home", "user") };
+		const piPath = path.join(env.HOME, ".pi", "agent", "memory");
+
+		expect(resolveActiveMemoryDir(env, (p) => p === piPath)).toBe(piPath);
+	});
+
+	test("falls back to ~/.oc2-memory when the pi folder is missing", () => {
+		const env = { HOME: path.join("home", "user") };
+
+		expect(resolveActiveMemoryDir(env, () => false)).toBe(path.join(env.HOME, ".oc2-memory"));
+	});
+
+	test("uses USERPROFILE for the fallback when HOME is unset", () => {
+		const env = { USERPROFILE: path.join("Users", "runneradmin") };
+
+		expect(resolveActiveMemoryDir(env, () => false)).toBe(path.join(env.USERPROFILE, ".oc2-memory"));
+	});
+
+	test("probes the filesystem once and caches the result until reset", () => {
+		_resetActiveMemoryDir();
+		let probes = 0;
+		const exists = (p: string) => {
+			probes++;
+			return p.includes(".pi");
+		};
+		const env = { HOME: path.join("home", "user") };
+
+		const first = _getActiveMemoryDir(env, exists);
+		const second = _getActiveMemoryDir(env, exists);
+
+		expect(first).toBe(second);
+		expect(probes).toBe(1);
+
+		_resetActiveMemoryDir();
+		_getActiveMemoryDir(env, exists);
+		expect(probes).toBe(2);
 	});
 });
 
@@ -1286,6 +1368,71 @@ describe("getQmdSearchTimeoutMs", () => {
 	});
 });
 
+describe("searchMemoryMarkdown", () => {
+	beforeEach(() => {
+		setupTmpDir();
+		ensureDirs();
+	});
+
+	afterEach(cleanupTmpDir);
+
+	test("finds a term in MEMORY.md", () => {
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "# Memory\n\nWe use tabs for indentation.\n", "utf-8");
+
+		const results = searchMemoryMarkdown("tabs", 5);
+
+		expect(results.length).toBe(1);
+		expect(results[0].path).toBe(path.join(tmpDir, "MEMORY.md"));
+		expect(results[0].content).toContain("tabs");
+	});
+
+	test("finds a term in a daily file and prefers the newest on a tie", () => {
+		fs.writeFileSync(path.join(tmpDir, "daily", "2024-01-01.md"), "alpha beta\nalpha\n", "utf-8");
+		fs.writeFileSync(path.join(tmpDir, "daily", "2024-02-01.md"), "alpha beta\nalpha\n", "utf-8");
+
+		const results = searchMemoryMarkdown("alpha", 5);
+
+		expect(results.length).toBe(2);
+		expect(results[0].path).toBe(path.join(tmpDir, "daily", "2024-02-01.md"));
+	});
+
+	test("requires all terms to match", () => {
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "alpha only\n", "utf-8");
+
+		expect(searchMemoryMarkdown("alpha beta", 5)).toEqual([]);
+	});
+
+	test("is case-insensitive", () => {
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "Remember TABS\n", "utf-8");
+
+		const results = searchMemoryMarkdown("tabs", 5);
+
+		expect(results.length).toBe(1);
+	});
+
+	test("returns [] and does not throw when nothing matches", () => {
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "nothing here\n", "utf-8");
+
+		expect(searchMemoryMarkdown("zzz", 5)).toEqual([]);
+	});
+
+	test("does not throw when the daily directory is missing", () => {
+		fs.rmSync(path.join(tmpDir, "daily"), { recursive: true, force: true });
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "alpha\n", "utf-8");
+
+		expect(() => searchMemoryMarkdown("alpha", 5)).not.toThrow();
+		expect(searchMemoryMarkdown("alpha", 5).length).toBe(1);
+	});
+
+	test("respects the limit", () => {
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "alpha alpha\n", "utf-8");
+		fs.writeFileSync(path.join(tmpDir, "daily", "2024-01-01.md"), "alpha\n", "utf-8");
+		fs.writeFileSync(path.join(tmpDir, "daily", "2024-01-02.md"), "alpha\n", "utf-8");
+
+		expect(searchMemoryMarkdown("alpha", 1).length).toBe(1);
+	});
+});
+
 describe("memory_search tool", () => {
 	let tools: Record<string, any>;
 
@@ -1304,7 +1451,7 @@ describe("memory_search tool", () => {
 		expect(tools.memory_search.name).toBe("memory_search");
 	});
 
-	test("returns error with setup instructions when qmd not fully configured", async () => {
+	test("falls back to markdown search when qmd is unavailable", async () => {
 		const execStub = ((...args: any[]) => {
 			const callback = args[args.length - 1] as (err: Error | null, stdout: string, stderr: string) => void;
 			callback(new Error("qmd not found"), "", "");
@@ -1314,9 +1461,13 @@ describe("memory_search tool", () => {
 		_setQmdAvailable(false);
 
 		try {
-			const result = await tools.memory_search.execute("c1", { query: "test" }, null, null, {});
-			expect(result.isError).toBe(true);
+			fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "We use tabs for indentation.\n", "utf-8");
+			const result = await tools.memory_search.execute("c1", { query: "tabs" }, null, null, {});
+			expect(result.isError).toBeFalsy();
 			expect(result.content[0].text).toContain("qmd");
+			expect(result.content[0].text).toContain("tabs");
+			expect(result.details.fallback).toBe("markdown");
+			expect(result.details.count).toBe(1);
 		} finally {
 			_resetExecFileForTest();
 		}
@@ -1328,6 +1479,32 @@ describe("memory_search tool", () => {
 		expect(desc).toContain("keyword");
 		expect(desc).toContain("semantic");
 		expect(desc).toContain("deep");
+	});
+
+	test("says semantic mode fell back to keyword when qmd is unavailable", async () => {
+		const execStub = ((...args: any[]) => {
+			const callback = args[args.length - 1] as (err: Error | null, stdout: string, stderr: string) => void;
+			callback(new Error("qmd not found"), "", "");
+		}) as any;
+
+		_setExecFileForTest(execStub);
+		_setQmdAvailable(false);
+
+		try {
+			const result = await tools.memory_search.execute(
+				"c1",
+				{ query: "anything", mode: "semantic" },
+				null,
+				null,
+				{},
+			);
+			expect(result.isError).toBeFalsy();
+			expect(result.content[0].text).toContain("semantic");
+			expect(result.content[0].text.toLowerCase()).toContain("keyword");
+			expect(result.details.fallback).toBe("markdown");
+		} finally {
+			_resetExecFileForTest();
+		}
 	});
 });
 

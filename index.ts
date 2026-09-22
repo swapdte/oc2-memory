@@ -47,17 +47,62 @@ type MemoryEnv = Partial<
 	[key: string]: string | undefined;
 };
 
-export function resolveMemoryDir(env: MemoryEnv = process.env): string {
-	if (env.PI_MEMORY_DIR) return env.PI_MEMORY_DIR;
-	const home =
+export function resolveHomeDir(env: MemoryEnv): string {
+	return (
 		env.HOME ??
 		env.USERPROFILE ??
 		(env.HOMEDRIVE && env.HOMEPATH ? `${env.HOMEDRIVE}${env.HOMEPATH}` : undefined) ??
-		"~";
-	return path.join(home, ".pi", "agent", "memory");
+		"~"
+	);
 }
 
-let MEMORY_DIR = resolveMemoryDir();
+export function resolveMemoryDir(env: MemoryEnv = process.env): string {
+	if (env.PI_MEMORY_DIR) return env.PI_MEMORY_DIR;
+	return path.join(resolveHomeDir(env), ".pi", "agent", "memory");
+}
+
+/**
+ * Filesystem-aware selector for the memory directory. Memory lives next to an
+ * existing pi installation (`~/.pi/agent/memory`) when that folder exists so
+ * the two tools share one store; otherwise it falls back to `~/.oc2-memory/`.
+ * `PI_MEMORY_DIR` wins and is used unchecked (created on demand).
+ *
+ * `exists` is injectable so this can be unit-tested without touching the real
+ * filesystem. `resolveMemoryDir` stays pure — existence checks live here only.
+ */
+export function resolveActiveMemoryDir(
+	env: MemoryEnv = process.env,
+	exists: (p: string) => boolean = fs.existsSync,
+): string {
+	if (env.PI_MEMORY_DIR) return env.PI_MEMORY_DIR;
+	const piPath = resolveMemoryDir(env);
+	if (exists(piPath)) return piPath;
+	return path.join(resolveHomeDir(env), ".oc2-memory");
+}
+
+// Resolved once per session and cached: a later pi install (or a deletion of
+// the pi folder) must not silently move the memory directory mid-session.
+let activeMemoryDirCache: string | null = null;
+
+function activeMemoryDir(env: MemoryEnv = process.env, exists: (p: string) => boolean = fs.existsSync): string {
+	if (activeMemoryDirCache === null) activeMemoryDirCache = resolveActiveMemoryDir(env, exists);
+	return activeMemoryDirCache;
+}
+
+/** Test seam: read the cached active memory dir with an injectable env/exists. */
+export function _getActiveMemoryDir(
+	env: MemoryEnv = process.env,
+	exists: (p: string) => boolean = fs.existsSync,
+): string {
+	return activeMemoryDir(env, exists);
+}
+
+/** Clear the cached memory directory (for testing). */
+export function _resetActiveMemoryDir() {
+	activeMemoryDirCache = null;
+}
+
+let MEMORY_DIR = activeMemoryDir();
 let MEMORY_FILE = path.join(MEMORY_DIR, "MEMORY.md");
 let SCRATCHPAD_FILE = path.join(MEMORY_DIR, "SCRATCHPAD.md");
 let DAILY_DIR = path.join(MEMORY_DIR, "daily");
@@ -74,7 +119,8 @@ export function _setBaseDir(baseDir: string) {
 
 /** Reset to default paths (for testing). */
 export function _resetBaseDir() {
-	_setBaseDir(resolveMemoryDir());
+	activeMemoryDirCache = null;
+	_setBaseDir(activeMemoryDir());
 }
 
 // ---------------------------------------------------------------------------
@@ -1285,6 +1331,122 @@ function getQmdResultText(r: QmdSearchResult): string {
 	return r.content ?? r.chunk ?? r.snippet ?? "";
 }
 
+/**
+ * Find the line containing the first query term and return it with a line of
+ * context either side. Plain string scanning only — no RegExp on user input.
+ */
+function markdownSnippet(content: string, terms: string[]): string {
+	const lines = content.split(/\r?\n/);
+	const lowerLines = lines.map((l) => l.toLowerCase());
+	const idx = lowerLines.findIndex((l) => terms.some((t) => l.includes(t)));
+	if (idx === -1) return content.slice(0, 300).trim();
+	const start = Math.max(0, idx - 1);
+	const end = Math.min(lines.length, idx + 2);
+	return lines.slice(start, end).join("\n").trim();
+}
+
+/** Count non-overlapping occurrences of `term` in `haystack` (both lowercase). */
+function countOccurrences(haystack: string, term: string): number {
+	if (!term) return 0;
+	let count = 0;
+	let idx = haystack.indexOf(term);
+	while (idx !== -1) {
+		count++;
+		idx = haystack.indexOf(term, idx + term.length);
+	}
+	return count;
+}
+
+/**
+ * Search the markdown memory files directly when qmd is unavailable. Reads
+ * MEMORY.md, SCRATCHPAD.md and daily/*.md (newest first); recovery/ holds JSON
+ * bookkeeping and is deliberately skipped. All whitespace-separated terms must
+ * appear (case-insensitive); results rank by total occurrences. Never throws —
+ * an unreadable file is skipped.
+ */
+export function searchMemoryMarkdown(query: string, limit: number): QmdSearchResult[] {
+	const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+	if (terms.length === 0 || limit <= 0) return [];
+
+	// Order breaks ties deterministically: MEMORY.md, then SCRATCHPAD.md, then
+	// daily logs newest-first, so a newer daily file wins over an older one.
+	const candidates: { path: string; order: number }[] = [
+		{ path: MEMORY_FILE, order: 0 },
+		{ path: SCRATCHPAD_FILE, order: 1 },
+	];
+
+	let dailyFiles: string[] = [];
+	try {
+		dailyFiles = fs
+			.readdirSync(DAILY_DIR)
+			.filter((name) => name.endsWith(".md"))
+			.sort()
+			.reverse();
+	} catch {
+		// Missing or unreadable daily directory — nothing to add.
+	}
+	dailyFiles.forEach((name, i) => {
+		candidates.push({ path: path.join(DAILY_DIR, name), order: 2 + i });
+	});
+
+	const scored: { result: QmdSearchResult; score: number; order: number }[] = [];
+	for (const { path: filePath, order } of candidates) {
+		const content = readFileSafe(filePath);
+		if (content === null) continue;
+		const lower = content.toLowerCase();
+		if (!terms.every((t) => lower.includes(t))) continue;
+
+		let score = 0;
+		for (const t of terms) score += countOccurrences(lower, t);
+		scored.push({
+			result: { path: filePath, content: markdownSnippet(content, terms), score },
+			score,
+			order,
+		});
+	}
+
+	scored.sort((a, b) => b.score - a.score || a.order - b.order);
+	return scored.slice(0, Math.max(0, Math.floor(limit))).map((entry) => entry.result);
+}
+
+/** Render search results the same way for both the qmd and markdown paths. */
+function formatSearchResults(results: QmdSearchResult[]): string {
+	return results
+		.map((r, i) => {
+			const parts: string[] = [`### Result ${i + 1}`];
+			const filePath = getQmdResultPath(r);
+			if (filePath) parts.push(`**File:** ${filePath}`);
+			if (r.score != null) parts.push(`**Score:** ${r.score}`);
+			const text = getQmdResultText(r);
+			if (text) parts.push(`\n${text}`);
+			return parts.join("\n");
+		})
+		.join("\n\n---\n\n");
+}
+
+/**
+ * Graceful degradation for memory_search when qmd is unavailable or its
+ * collection cannot be set up: search the markdown files directly instead of
+ * erroring. qmd install instructions are kept as a hint at the end.
+ */
+function markdownFallbackSearch(
+	query: string,
+	mode: "keyword" | "semantic" | "deep",
+	limit: number,
+	reason: string,
+): { content: { type: "text"; text: string }[]; details: Record<string, unknown> } {
+	const results = searchMemoryMarkdown(query, limit);
+	const needsQmdForMode = mode === "semantic" || mode === "deep";
+	const header = needsQmdForMode
+		? `${reason} — searched the markdown memory files directly. The '${mode}' mode needs qmd; fell back to keyword matching.`
+		: `${reason} — searched the markdown memory files directly.`;
+	const body = results.length > 0 ? formatSearchResults(results) : `No results found for "${query}".`;
+	return {
+		content: [{ type: "text", text: [header, "", body, "", qmdInstallInstructions()].join("\n") }],
+		details: { mode, query, count: results.length, fallback: "markdown", qmd: false },
+	};
+}
+
 function stripAnsi(text: string): string {
 	// qmd may emit spinners/progress bars even with --json, especially on first model download.
 	// Strip ANSI CSI/OSC sequences so we can reliably find and parse JSON payloads.
@@ -2289,22 +2451,16 @@ export default function (pi: ExtensionAPI) {
 			limit: Type.Optional(Type.Number({ description: "Max results (default: 5)" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			const mode = params.mode ?? "keyword";
+			const limit = clampSearchLimit(params.limit);
+
 			if (!qmdAvailable) {
 				// Re-check on demand in case qmd was installed after session start.
 				qmdAvailable = await detectQmd();
 			}
 
 			if (!qmdAvailable) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: qmdInstallInstructions(),
-						},
-					],
-					isError: true,
-					details: {},
-				};
+				return markdownFallbackSearch(params.query, mode, limit, "qmd is not installed");
 			}
 
 			let hasCollection = await checkCollection("pi-memory");
@@ -2315,20 +2471,8 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			if (!hasCollection) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: "Could not set up qmd pi-memory collection. Check that qmd is working and the memory directory exists.",
-						},
-					],
-					isError: true,
-					details: {},
-				};
+				return markdownFallbackSearch(params.query, mode, limit, "Could not set up the qmd pi-memory collection");
 			}
-
-			const mode = params.mode ?? "keyword";
-			const limit = clampSearchLimit(params.limit);
 
 			try {
 				const { results, stderr } = await runQmdSearch(mode, params.query, limit);
@@ -2370,17 +2514,7 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
-				const formatted = results
-					.map((r, i) => {
-						const parts: string[] = [`### Result ${i + 1}`];
-						const filePath = getQmdResultPath(r);
-						if (filePath) parts.push(`**File:** ${filePath}`);
-						if (r.score != null) parts.push(`**Score:** ${r.score}`);
-						const text = getQmdResultText(r);
-						if (text) parts.push(`\n${text}`);
-						return parts.join("\n");
-					})
-					.join("\n\n---\n\n");
+				const formatted = formatSearchResults(results);
 
 				return {
 					content: [{ type: "text", text: formatted }],
