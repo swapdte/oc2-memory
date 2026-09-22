@@ -202,7 +202,10 @@ describe("GitHub Actions workflows", () => {
 		// through `id-token: write` and must not point at a secret any more.
 		expect(publishWorkflow).not.toContain("NODE_AUTH_TOKEN");
 		expect(publishWorkflow).not.toContain("secrets.NPM_TOKEN");
-		expect(publishWorkflow).toContain('node-version: "22.19.0"');
+		// Trusted publishing needs npm >= 11.5.1: Node 24 ships npm 11, and the
+		// workflow upgrades npm anyway so the OIDC exchange is always available.
+		expect(publishWorkflow).toContain('node-version: "24"');
+		expect(publishWorkflow).toContain("npm install -g npm@latest");
 		expect(publishWorkflow).toContain("id-token: write");
 		expect(publishWorkflow).toContain(`tag="\${GITHUB_REF_NAME#v}"`);
 		expect(publishWorkflow).toContain("npm run lint");

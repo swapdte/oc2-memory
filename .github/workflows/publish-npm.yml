@@ -17,12 +17,16 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: "22.19.0"
+          # Trusted publishing needs npm >= 11.5.1, which is what Node 24 ships.
+          node-version: "24"
           cache: npm
           registry-url: "https://registry.npmjs.org"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      # Trusted publishing requires npm CLI >= 11.5.1; take the newest so the
+      # OIDC exchange is available whatever the runner image bundles.
+      - run: npm install -g npm@latest
       - run: npm ci
       - name: Verify tag matches package.json version
         shell: bash
