@@ -2260,7 +2260,10 @@ describe("installer CLI config helpers", () => {
 	test("writeConfig writes mode 0600 and round-trips", () => {
 		writeConfig(configPath, { plugins: ["oc2-memory"] });
 		expect(readConfig(configPath)).toEqual({ plugins: ["oc2-memory"] });
-		expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+		// Windows has no POSIX mode bits; Node reports a synthesized 0o666 there.
+		if (process.platform !== "win32") {
+			expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+		}
 	});
 
 	test("writeConfig is atomic: no .tmp file is left behind", () => {
