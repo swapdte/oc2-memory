@@ -211,7 +211,7 @@ describe("GitHub Actions workflows", () => {
 		expect(qmdWorkflow).toContain("name: Windows qmd smoke");
 		expect(qmdWorkflow).toContain("paths:");
 		expect(qmdWorkflow).toContain('QMD_VERSION: "2.5.3"');
-		expect(qmdWorkflow).toContain("uses: actions/cache@v4");
+		expect(qmdWorkflow).toContain("uses: actions/cache@v5");
 		expect(qmdWorkflow).toContain('"@tobilu/qmd@$env:QMD_VERSION"');
 	});
 
