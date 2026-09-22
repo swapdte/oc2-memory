@@ -20,7 +20,6 @@ import {
 	_resetActiveMemoryDir,
 	_resetBaseDir,
 	_resetExecFileForTest,
-	_resetMemorySnapshot,
 	_resetQmdJsResolutionForTest,
 	_setBaseDir,
 	_setExecFileForTest,
@@ -34,11 +33,8 @@ import {
 	ensureQmdEmbed,
 	forgetBlocks,
 	getEmbedProbeTimeoutMs,
-	getExitSummaryReasoningEffort,
-	getExitSummaryTimeoutMs,
 	getQmdSearchTimeoutMs,
-	isExitSummaryEmpty,
-	isExitSummaryEnabled,
+	MEMORY_TOOLS,
 	nowTimestamp,
 	parseScratchpad,
 	probeEmbeddings,
@@ -80,21 +76,17 @@ function cleanupTmpDir() {
 	fs.rmSync(tmpDir, { recursive: true, force: true });
 }
 
-/** Create a mock ExtensionAPI and capture registered tools/hooks. */
-function createMockPi() {
+/** Build the tool map from the exported OpenCode-agnostic definitions. */
+function memoryTools(): Record<string, any> {
 	const tools: Record<string, any> = {};
-	const hooks: Record<string, (...args: unknown[]) => unknown> = {};
-
-	const pi = {
-		registerTool(toolDef: any) {
-			tools[toolDef.name] = toolDef;
-		},
-		on(event: string, handler: (...args: unknown[]) => unknown) {
-			hooks[event] = handler;
-		},
-	};
-
-	return { pi, tools, hooks };
+	for (const tool of MEMORY_TOOLS) {
+		tools[tool.name] = {
+			...tool,
+			// Tests keep calling the old 5-arg shape; adapt to execute(params, ctx).
+			execute: (_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) => tool.execute(params, ctx),
+		};
+	}
+	return tools;
 }
 
 /** Create a mock tool execution context. */
@@ -104,27 +96,6 @@ function createMockCtx(sessionId = "abcdef1234567890") {
 			getSessionId: () => sessionId,
 		},
 		hasUI: true,
-		ui: {
-			notify: mock(() => {}),
-		},
-	};
-}
-
-function createShutdownCtx(options?: {
-	sessionId?: string;
-	branch?: any[];
-	model?: { provider: string; id: string };
-	modelRegistry?: Record<string, unknown>;
-}) {
-	const sessionId = options?.sessionId ?? "abcdef1234567890";
-	return {
-		sessionManager: {
-			getSessionId: () => sessionId,
-			getBranch: () => options?.branch ?? [],
-		},
-		model: options?.model,
-		modelRegistry: options?.modelRegistry ?? {},
-		hasUI: false,
 		ui: {
 			notify: mock(() => {}),
 		},
@@ -160,27 +131,20 @@ describe("runtime package scope", () => {
 		expect(agentsGuide).toContain("https://github.com/jayzeng/pi-memory");
 	});
 
-	// index.ts still holds pi's implementation, so its runtime packages stay pinned until the port
-	// replaces that code. This also keeps the deprecated @mariozechner fork from creeping back in
-	// during the transition.
-	test("keeps the official pi packages pinned while the port is in progress", () => {
+	// The port is finished: no pi packages remain in the runtime source or the
+	// manifest, and the deprecated @mariozechner fork must not creep back in.
+	test("has no pi coupling", () => {
 		const packageJson = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
 		const source = fs.readFileSync(new URL("../index.ts", import.meta.url), "utf-8");
-		const bunLock = fs.readFileSync(new URL("../bun.lock", import.meta.url), "utf-8");
 
-		expect(source).toContain('from "@earendil-works/pi-ai"');
-		expect(source).toContain('from "@earendil-works/pi-coding-agent"');
+		expect(source).not.toContain("@earendil-works");
+		expect(source).not.toContain("@mariozechner");
 
-		expect(packageJson.devDependencies["@earendil-works/pi-ai"]).toBe("0.84.1");
-		expect(packageJson.devDependencies["@earendil-works/pi-coding-agent"]).toBe("0.84.1");
-		expect(packageJson.peerDependencies["@earendil-works/pi-ai"]).toBe(">=0.81.1");
-		expect(packageJson.peerDependencies["@earendil-works/pi-coding-agent"]).toBe(">=0.81.1");
-		expect(packageJson.peerDependencies["@sinclair/typebox"]).toBeUndefined();
-
-		for (const text of [source, bunLock, JSON.stringify(packageJson)]) {
-			expect(text).not.toContain("@mariozechner/pi-ai");
-			expect(text).not.toContain("@mariozechner/pi-coding-agent");
-		}
+		expect(packageJson.devDependencies["@earendil-works/pi-ai"]).toBeUndefined();
+		expect(packageJson.devDependencies["@earendil-works/pi-coding-agent"]).toBeUndefined();
+		expect(packageJson.peerDependencies?.["@earendil-works/pi-ai"]).toBeUndefined();
+		expect(packageJson.peerDependencies?.["@earendil-works/pi-coding-agent"]).toBeUndefined();
+		expect(packageJson.peerDependencies?.["@sinclair/typebox"]).toBeUndefined();
 	});
 });
 
@@ -235,7 +199,7 @@ describe("GitHub Actions workflows", () => {
 });
 
 // We need to import the extension registration and V2 setup entry points
-import oc2MemoryPlugin, { registerExtension, setup } from "../index.js";
+import oc2MemoryPlugin, { setup } from "../index.js";
 
 // ==========================================================================
 // 1. Utility functions
@@ -883,9 +847,7 @@ describe("memory_write tool", () => {
 		setupTmpDir();
 		ensureDirs();
 		_setQmdAvailable(false);
-		const mockPi = createMockPi();
-		tools = mockPi.tools;
-		registerExtension(mockPi.pi as any);
+		tools = memoryTools();
 	});
 
 	afterEach(cleanupTmpDir);
@@ -1016,9 +978,7 @@ describe("scratchpad tool", () => {
 		setupTmpDir();
 		ensureDirs();
 		_setQmdAvailable(false);
-		const mockPi = createMockPi();
-		tools = mockPi.tools;
-		registerExtension(mockPi.pi as any);
+		tools = memoryTools();
 	});
 
 	afterEach(cleanupTmpDir);
@@ -1167,9 +1127,7 @@ describe("memory_read tool", () => {
 		setupTmpDir();
 		ensureDirs();
 		_setQmdAvailable(false);
-		const mockPi = createMockPi();
-		tools = mockPi.tools;
-		registerExtension(mockPi.pi as any);
+		tools = memoryTools();
 	});
 
 	afterEach(cleanupTmpDir);
@@ -1439,9 +1397,7 @@ describe("memory_search tool", () => {
 	beforeEach(() => {
 		setupTmpDir();
 		ensureDirs();
-		const mockPi = createMockPi();
-		tools = mockPi.tools;
-		registerExtension(mockPi.pi as any);
+		tools = memoryTools();
 	});
 
 	afterEach(cleanupTmpDir);
@@ -1514,9 +1470,7 @@ describe("memory_status tool", () => {
 	beforeEach(() => {
 		setupTmpDir();
 		ensureDirs();
-		const mockPi = createMockPi();
-		tools = mockPi.tools;
-		registerExtension(mockPi.pi as any);
+		tools = memoryTools();
 	});
 
 	afterEach(() => {
@@ -1545,785 +1499,6 @@ describe("memory_status tool", () => {
 		expect(text).toContain("qmd available: ✗");
 		expect(result.details.qmd).toBe(false);
 		expect(result.details.longTermChars).toBeGreaterThan(0);
-	});
-});
-
-// ==========================================================================
-// 9. Lifecycle hooks
-// ==========================================================================
-
-describe("lifecycle hooks", () => {
-	let hooks: Record<string, (...args: unknown[]) => unknown>;
-
-	beforeEach(() => {
-		setupTmpDir();
-		ensureDirs();
-		_setQmdAvailable(false);
-		_resetMemorySnapshot();
-		const mockPi = createMockPi();
-		hooks = mockPi.hooks;
-		registerExtension(mockPi.pi as any);
-	});
-
-	afterEach(cleanupTmpDir);
-
-	test("registers all expected hooks", () => {
-		expect(hooks.session_start).toBeDefined();
-		expect(hooks.session_shutdown).toBeDefined();
-		expect(hooks.before_agent_start).toBeDefined();
-		expect(hooks.session_before_compact).toBeDefined();
-	});
-
-	// -- before_agent_start --
-
-	test("before_agent_start returns undefined when no memory files", async () => {
-		const event = { systemPrompt: "base prompt" };
-		const result = await hooks.before_agent_start(event, {});
-		expect(result).toBeUndefined();
-	});
-
-	test("before_agent_start injects memory into system prompt", async () => {
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "Remember this", "utf-8");
-		const event = { systemPrompt: "base prompt" };
-		const result = await hooks.before_agent_start(event, {});
-		expect(result).toBeDefined();
-		expect(result.systemPrompt).toContain("base prompt");
-		expect(result.systemPrompt).toContain("Remember this");
-		expect(result.systemPrompt).toContain("## Memory");
-	});
-
-	test("before_agent_start includes usage instructions", async () => {
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "Some memory", "utf-8");
-		const event = { systemPrompt: "" };
-		const result = await hooks.before_agent_start(event, {});
-		expect(result.systemPrompt).toContain("memory_write");
-		expect(result.systemPrompt).toContain("memory_search");
-		expect(result.systemPrompt).toContain("scratchpad");
-	});
-
-	// -- session_shutdown --
-
-	test("session_shutdown clears update timer", async () => {
-		_setQmdAvailable(true);
-		scheduleQmdUpdate();
-		expect(_getUpdateTimer()).not.toBeNull();
-		await hooks.session_shutdown({}, createShutdownCtx());
-		expect(_getUpdateTimer()).toBeNull();
-	});
-
-	test("session_shutdown is safe when no timer exists", async () => {
-		_clearUpdateTimer();
-		// Should not throw
-		await hooks.session_shutdown({}, {});
-	});
-
-	test("session_shutdown writes nothing when summary generation is unavailable", async () => {
-		// Previously a boilerplate "Auto-summary unavailable / None." block was
-		// appended on every failed summarization, polluting the daily log that
-		// gets re-injected into context each session start.
-		const ctx = createShutdownCtx({
-			branch: [
-				{
-					type: "message",
-					message: {
-						role: "user",
-						content: [{ type: "text", text: "Please remember we chose SQLite." }],
-						timestamp: Date.now(),
-					},
-				},
-				{
-					type: "message",
-					message: {
-						role: "assistant",
-						content: [{ type: "text", text: "Noted, using it for the storage layer." }],
-						timestamp: Date.now(),
-					},
-				},
-				{
-					type: "message",
-					message: {
-						role: "user",
-						content: [{ type: "text", text: "Also migrate the config to match." }],
-						timestamp: Date.now(),
-					},
-				},
-				{
-					type: "message",
-					message: {
-						role: "assistant",
-						content: [{ type: "text", text: "Done — config migrated and tests pass." }],
-						timestamp: Date.now(),
-					},
-				},
-			],
-			model: { provider: "openai", id: "gpt-4o-mini" },
-			modelRegistry: {},
-		});
-
-		await hooks.session_shutdown({}, ctx);
-
-		expect(fs.existsSync(dailyPath(todayStr()))).toBe(false);
-	});
-
-	test("session_shutdown with reason=reload skips exit summary entirely", async () => {
-		// Regression test for: /reload blocks for several seconds because
-		// session_shutdown fires generateExitSummary() on every reload.
-		const ctx = createShutdownCtx({
-			branch: [
-				{
-					type: "message",
-					message: {
-						role: "user",
-						content: [{ type: "text", text: "hi" }],
-						timestamp: Date.now(),
-					},
-				},
-			],
-			model: { provider: "openai", id: "gpt-4o-mini" },
-		});
-
-		await hooks.session_shutdown({ reason: "reload" }, ctx);
-
-		// No daily log file should have been created — summary was skipped.
-		expect(fs.existsSync(dailyPath(todayStr()))).toBe(false);
-	});
-
-	test("session_shutdown skips trivial sessions without attempting a summary", async () => {
-		// Curated-write gate: a 2-message session (one-liner Q&A) has nothing
-		// worth summarizing — no LLM call, no daily-log write.
-		const getApiKey = mock(async () => "key");
-		const ctx = createShutdownCtx({
-			branch: [
-				{
-					type: "message",
-					message: {
-						role: "user",
-						content: [{ type: "text", text: "ls" }],
-						timestamp: Date.now(),
-					},
-				},
-				{
-					type: "message",
-					message: {
-						role: "assistant",
-						content: [{ type: "text", text: "file.txt" }],
-						timestamp: Date.now(),
-					},
-				},
-			],
-			model: { provider: "openai", id: "gpt-4o-mini" },
-			modelRegistry: { getApiKey },
-		});
-
-		await hooks.session_shutdown({}, ctx);
-
-		expect(getApiKey).not.toHaveBeenCalled();
-		expect(fs.existsSync(dailyPath(todayStr()))).toBe(false);
-	});
-
-	test("session_shutdown with reason=quit still attempts the exit summary", async () => {
-		// Ensure the reload-skip guard does not suppress real quit summaries.
-		// Summarization cannot succeed here (no API key), so the attempt is
-		// observed via the API-key lookup — and no boilerplate is written.
-		const getApiKey = mock(async () => undefined);
-		const ctx = createShutdownCtx({
-			branch: [
-				{
-					type: "message",
-					message: {
-						role: "user",
-						content: [{ type: "text", text: "Please remember we chose dark mode." }],
-						timestamp: Date.now(),
-					},
-				},
-				{
-					type: "message",
-					message: {
-						role: "assistant",
-						content: [{ type: "text", text: "Noted, using it for the storage layer." }],
-						timestamp: Date.now(),
-					},
-				},
-				{
-					type: "message",
-					message: {
-						role: "user",
-						content: [{ type: "text", text: "Also migrate the config to match." }],
-						timestamp: Date.now(),
-					},
-				},
-				{
-					type: "message",
-					message: {
-						role: "assistant",
-						content: [{ type: "text", text: "Done — config migrated and tests pass." }],
-						timestamp: Date.now(),
-					},
-				},
-			],
-			model: { provider: "openai", id: "gpt-4o-mini" },
-			modelRegistry: { getApiKey },
-		});
-
-		await hooks.session_shutdown({ reason: "quit" }, ctx);
-
-		expect(getApiKey).toHaveBeenCalled();
-		expect(fs.existsSync(dailyPath(todayStr()))).toBe(false);
-	});
-
-	// -- exit summary configurability (PI_MEMORY_EXIT_SUMMARY / PI_MEMORY_EXIT_SUMMARY_MODEL) --
-
-	describe("exit summary configurability", () => {
-		const fourMessageBranch = () => [
-			{
-				type: "message",
-				message: {
-					role: "user",
-					content: [{ type: "text", text: "Please remember we chose dark mode." }],
-					timestamp: Date.now(),
-				},
-			},
-			{
-				type: "message",
-				message: {
-					role: "assistant",
-					content: [{ type: "text", text: "Noted, using it for the storage layer." }],
-					timestamp: Date.now(),
-				},
-			},
-			{
-				type: "message",
-				message: {
-					role: "user",
-					content: [{ type: "text", text: "Also migrate the config to match." }],
-					timestamp: Date.now(),
-				},
-			},
-			{
-				type: "message",
-				message: {
-					role: "assistant",
-					content: [{ type: "text", text: "Done — config migrated and tests pass." }],
-					timestamp: Date.now(),
-				},
-			},
-		];
-
-		let savedEnabled: string | undefined;
-		let savedModel: string | undefined;
-		beforeEach(() => {
-			savedEnabled = process.env.PI_MEMORY_EXIT_SUMMARY;
-			savedModel = process.env.PI_MEMORY_EXIT_SUMMARY_MODEL;
-		});
-		afterEach(() => {
-			if (savedEnabled === undefined) delete process.env.PI_MEMORY_EXIT_SUMMARY;
-			else process.env.PI_MEMORY_EXIT_SUMMARY = savedEnabled;
-			if (savedModel === undefined) delete process.env.PI_MEMORY_EXIT_SUMMARY_MODEL;
-			else process.env.PI_MEMORY_EXIT_SUMMARY_MODEL = savedModel;
-		});
-
-		test("PI_MEMORY_EXIT_SUMMARY=0 skips the exit summary on real quit", async () => {
-			process.env.PI_MEMORY_EXIT_SUMMARY = "0";
-			const getApiKey = mock(async () => "key");
-			const ctx = createShutdownCtx({
-				branch: fourMessageBranch(),
-				model: { provider: "openai", id: "gpt-4o-mini" },
-				modelRegistry: { getApiKey },
-			});
-
-			await hooks.session_shutdown({ reason: "quit" }, ctx);
-
-			expect(getApiKey).not.toHaveBeenCalled();
-			expect(fs.existsSync(dailyPath(todayStr()))).toBe(false);
-		});
-
-		test("PI_MEMORY_EXIT_SUMMARY=off (and other aliases) also disable", async () => {
-			for (const value of ["off", "false", "no"]) {
-				process.env.PI_MEMORY_EXIT_SUMMARY = value;
-				expect(isExitSummaryEnabled()).toBe(false);
-			}
-			delete process.env.PI_MEMORY_EXIT_SUMMARY;
-			expect(isExitSummaryEnabled()).toBe(true);
-		});
-
-		test("PI_MEMORY_EXIT_SUMMARY_MODEL routes the summary to the configured model", async () => {
-			process.env.PI_MEMORY_EXIT_SUMMARY_MODEL = "anthropic/claude-haiku-4";
-			const overrideModel = { provider: "anthropic", id: "claude-haiku-4" };
-			const find = mock((_provider: string, _id: string) => overrideModel);
-			const getApiKey = mock(async (_model: unknown) => undefined);
-			const ctx = createShutdownCtx({
-				branch: fourMessageBranch(),
-				model: { provider: "openai", id: "gpt-4o-mini" },
-				modelRegistry: { find, getApiKey },
-			});
-
-			await hooks.session_shutdown({ reason: "quit" }, ctx);
-
-			expect(find).toHaveBeenCalledWith("anthropic", "claude-haiku-4");
-			expect(getApiKey).toHaveBeenCalledWith(overrideModel);
-		});
-
-		test("unresolvable PI_MEMORY_EXIT_SUMMARY_MODEL falls back to the session model", async () => {
-			process.env.PI_MEMORY_EXIT_SUMMARY_MODEL = "nonexistent/no-such-model";
-			const sessionModel = { provider: "openai", id: "gpt-4o-mini" };
-			const find = mock((_provider: string, _id: string) => undefined);
-			const getApiKey = mock(async (_model: unknown) => undefined);
-			const ctx = createShutdownCtx({
-				branch: fourMessageBranch(),
-				model: sessionModel,
-				modelRegistry: { find, getApiKey },
-			});
-
-			await hooks.session_shutdown({ reason: "quit" }, ctx);
-
-			expect(getApiKey).toHaveBeenCalledWith(sessionModel);
-		});
-	});
-
-	describe("isExitSummaryEmpty", () => {
-		test("treats all-None summaries as empty", () => {
-			const summary = [
-				"### Decisions",
-				"- None.",
-				"### Lessons Learned",
-				"- None.",
-				"### Notes",
-				"- None.",
-				"### Follow-ups",
-				"- None.",
-			].join("\n");
-			expect(isExitSummaryEmpty(summary)).toBe(true);
-		});
-
-		test("tolerates formatting variations (bullets, case, missing period)", () => {
-			expect(isExitSummaryEmpty("### Decisions\nNone\n### Notes\n* none.")).toBe(true);
-			expect(isExitSummaryEmpty("None.")).toBe(true);
-			expect(isExitSummaryEmpty("### Decisions\n### Notes")).toBe(true);
-		});
-
-		test("keeps summaries with any real content", () => {
-			const summary = [
-				"### Decisions",
-				"- None.",
-				"### Lessons Learned",
-				"- None.",
-				"### Notes",
-				"- User prefers dark mode.",
-				"### Follow-ups",
-				"- None.",
-			].join("\n");
-			expect(isExitSummaryEmpty(summary)).toBe(false);
-			expect(isExitSummaryEmpty("### Notes\n- Discussed None. vs null semantics")).toBe(false);
-		});
-	});
-
-	describe("exit summary shutdown timeout", () => {
-		const fourMessageBranch = () => [
-			{
-				type: "message",
-				message: {
-					role: "user",
-					content: [{ type: "text", text: "Please remember we chose dark mode." }],
-					timestamp: Date.now(),
-				},
-			},
-			{
-				type: "message",
-				message: {
-					role: "assistant",
-					content: [{ type: "text", text: "Noted, using it for the storage layer." }],
-					timestamp: Date.now(),
-				},
-			},
-			{
-				type: "message",
-				message: {
-					role: "user",
-					content: [{ type: "text", text: "Also migrate the config to match." }],
-					timestamp: Date.now(),
-				},
-			},
-			{
-				type: "message",
-				message: {
-					role: "assistant",
-					content: [{ type: "text", text: "Done — config migrated and tests pass." }],
-					timestamp: Date.now(),
-				},
-			},
-		];
-
-		let savedTimeout: string | undefined;
-		beforeEach(() => {
-			savedTimeout = process.env.PI_MEMORY_EXIT_SUMMARY_TIMEOUT_MS;
-		});
-		afterEach(() => {
-			if (savedTimeout === undefined) delete process.env.PI_MEMORY_EXIT_SUMMARY_TIMEOUT_MS;
-			else process.env.PI_MEMORY_EXIT_SUMMARY_TIMEOUT_MS = savedTimeout;
-		});
-
-		test("getExitSummaryTimeoutMs parses env with fallback to default", () => {
-			delete process.env.PI_MEMORY_EXIT_SUMMARY_TIMEOUT_MS;
-			expect(getExitSummaryTimeoutMs()).toBe(10_000);
-			process.env.PI_MEMORY_EXIT_SUMMARY_TIMEOUT_MS = "250";
-			expect(getExitSummaryTimeoutMs()).toBe(250);
-			process.env.PI_MEMORY_EXIT_SUMMARY_TIMEOUT_MS = "not-a-number";
-			expect(getExitSummaryTimeoutMs()).toBe(10_000);
-			process.env.PI_MEMORY_EXIT_SUMMARY_TIMEOUT_MS = "-5";
-			expect(getExitSummaryTimeoutMs()).toBe(10_000);
-		});
-
-		test("session_shutdown stays responsive when summary generation hangs", async () => {
-			// Pi core awaits session_shutdown handlers with no timeout; a hanging
-			// provider must not block quitting forever. The API-key lookup never
-			// resolves here, so without a self-imposed timeout this test only fails
-			// via bun's per-test timeout.
-			process.env.PI_MEMORY_EXIT_SUMMARY_TIMEOUT_MS = "50";
-			const getApiKey = mock(() => new Promise<string | undefined>(() => {}));
-			const ctx = createShutdownCtx({
-				branch: fourMessageBranch(),
-				model: { provider: "openai", id: "gpt-4o-mini" },
-				modelRegistry: { getApiKey },
-			});
-
-			await hooks.session_shutdown({ reason: "quit" }, ctx);
-
-			expect(getApiKey).toHaveBeenCalled();
-			expect(fs.existsSync(dailyPath(todayStr()))).toBe(false);
-		});
-	});
-
-	describe("exit summary reasoning effort", () => {
-		let savedEffort: string | undefined;
-		beforeEach(() => {
-			savedEffort = process.env.PI_MEMORY_EXIT_SUMMARY_REASONING_EFFORT;
-		});
-		afterEach(() => {
-			if (savedEffort === undefined) delete process.env.PI_MEMORY_EXIT_SUMMARY_REASONING_EFFORT;
-			else process.env.PI_MEMORY_EXIT_SUMMARY_REASONING_EFFORT = savedEffort;
-		});
-
-		test("getExitSummaryReasoningEffort defaults to low", () => {
-			delete process.env.PI_MEMORY_EXIT_SUMMARY_REASONING_EFFORT;
-			expect(getExitSummaryReasoningEffort()).toBe("low");
-		});
-
-		test("getExitSummaryReasoningEffort passes through configured values", () => {
-			for (const value of ["high", "max", "none", "medium", "minimal", "xhigh"]) {
-				process.env.PI_MEMORY_EXIT_SUMMARY_REASONING_EFFORT = value;
-				expect(getExitSummaryReasoningEffort()).toBe(value);
-			}
-		});
-
-		test("getExitSummaryReasoningEffort is case-insensitive", () => {
-			process.env.PI_MEMORY_EXIT_SUMMARY_REASONING_EFFORT = "HIGH";
-			expect(getExitSummaryReasoningEffort()).toBe("high");
-		});
-
-		test("getExitSummaryReasoningEffort returns undefined for off", () => {
-			process.env.PI_MEMORY_EXIT_SUMMARY_REASONING_EFFORT = "off";
-			expect(getExitSummaryReasoningEffort()).toBeUndefined();
-		});
-
-		test("getExitSummaryReasoningEffort treats empty string as default", () => {
-			process.env.PI_MEMORY_EXIT_SUMMARY_REASONING_EFFORT = "   ";
-			expect(getExitSummaryReasoningEffort()).toBe("low");
-		});
-	});
-
-	// -- session_before_compact --
-
-	test("session_before_compact appends handoff when scratchpad has open items", async () => {
-		fs.writeFileSync(path.join(tmpDir, "SCRATCHPAD.md"), "# Scratchpad\n\n- [ ] Follow up", "utf-8");
-		const ctx = createMockCtx();
-		await hooks.session_before_compact({}, ctx);
-		const content = fs.readFileSync(dailyPath(todayStr()), "utf-8");
-		expect(content).toContain("Session Handoff");
-		expect(content).toContain("Follow up");
-	});
-
-	test("session_before_compact does not notify when no memory", async () => {
-		const ctx = createMockCtx();
-		await hooks.session_before_compact({}, ctx);
-		expect(ctx.ui.notify).not.toHaveBeenCalled();
-	});
-});
-
-// ==========================================================================
-// 9b. KV cache stability (Option P snapshot behavior)
-// ==========================================================================
-
-describe("KV cache stability: memory snapshot", () => {
-	let hooks: Record<string, (...args: unknown[]) => unknown>;
-	let tools: Record<string, any>;
-	const prevSnapshotEnv = process.env.PI_MEMORY_SNAPSHOT;
-	const prevNoSearchEnv = process.env.PI_MEMORY_NO_SEARCH;
-
-	beforeEach(() => {
-		setupTmpDir();
-		ensureDirs();
-		_setQmdAvailable(false);
-		_resetMemorySnapshot();
-		// Default to stable mode for these tests; per-turn test overrides locally.
-		delete process.env.PI_MEMORY_SNAPSHOT;
-		// Avoid implicit search calls bleeding in.
-		process.env.PI_MEMORY_NO_SEARCH = "1";
-		const mockPi = createMockPi();
-		hooks = mockPi.hooks;
-		tools = mockPi.tools;
-		registerExtension(mockPi.pi as any);
-	});
-
-	afterEach(() => {
-		if (prevSnapshotEnv === undefined) delete process.env.PI_MEMORY_SNAPSHOT;
-		else process.env.PI_MEMORY_SNAPSHOT = prevSnapshotEnv;
-		if (prevNoSearchEnv === undefined) delete process.env.PI_MEMORY_NO_SEARCH;
-		else process.env.PI_MEMORY_NO_SEARCH = prevNoSearchEnv;
-		cleanupTmpDir();
-	});
-
-	test("byte-stable systemPrompt across turns despite mid-session file mutations", async () => {
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "Initial long-term content", "utf-8");
-		fs.writeFileSync(
-			path.join(tmpDir, "SCRATCHPAD.md"),
-			"# Scratchpad\n\n<!-- ts -->\n- [ ] initial item\n",
-			"utf-8",
-		);
-
-		const event1 = { systemPrompt: "base prompt", prompt: "first user query" };
-		const result1 = await hooks.before_agent_start(event1, {});
-		expect(result1).toBeDefined();
-		expect(result1.systemPrompt).toContain("Initial long-term content");
-
-		// Mutate disk state mid-session (simulates external edits, scratchpad/daily writes via tools, etc.)
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "MUTATED long-term content XYZ", "utf-8");
-		fs.writeFileSync(
-			path.join(tmpDir, "SCRATCHPAD.md"),
-			"# Scratchpad\n\n<!-- ts2 -->\n- [ ] new mutated item\n",
-			"utf-8",
-		);
-		fs.writeFileSync(dailyPath(todayStr()), "Brand new daily log mid-session", "utf-8");
-
-		const event2 = { systemPrompt: "base prompt", prompt: "completely different second query" };
-		const result2 = await hooks.before_agent_start(event2, {});
-		expect(result2).toBeDefined();
-		// The whole point: prompt must be byte-identical for KV cache.
-		expect(result2.systemPrompt).toBe(result1.systemPrompt);
-		expect(result2.systemPrompt).not.toContain("MUTATED");
-		expect(result2.systemPrompt).not.toContain("Brand new daily log");
-	});
-
-	test("session_before_compact refreshes snapshot even when no handoff is written", async () => {
-		// Snapshot captures an open scratchpad item plus some long-term content
-		// so the post-refresh snapshot is still non-empty (and we get a result).
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "Stable long-term content", "utf-8");
-		fs.writeFileSync(path.join(tmpDir, "SCRATCHPAD.md"), "# Scratchpad\n\n<!-- ts -->\n- [ ] stale item\n", "utf-8");
-		const result1 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result1.systemPrompt).toContain("stale item");
-
-		// User completes the item via scratchpad tool (does not mark dirty by design).
-		fs.writeFileSync(path.join(tmpDir, "SCRATCHPAD.md"), "# Scratchpad\n\n<!-- ts -->\n- [x] stale item\n", "utf-8");
-
-		// Compaction fires with no open scratchpad items and no daily log → empty handoff.
-		await hooks.session_before_compact({}, createMockCtx());
-
-		// Next turn must reflect the new on-disk state because tool history was compacted away.
-		const result2 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result2).toBeDefined();
-		expect(result2.systemPrompt).not.toContain("stale item");
-		expect(result2.systemPrompt).toContain("Stable long-term content");
-	});
-
-	test("session_before_compact refreshes snapshot so handoff is visible next turn", async () => {
-		fs.writeFileSync(
-			path.join(tmpDir, "SCRATCHPAD.md"),
-			"# Scratchpad\n\n<!-- ts -->\n- [ ] follow up later\n",
-			"utf-8",
-		);
-
-		const result1 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result1.systemPrompt).toContain("follow up later");
-		expect(result1.systemPrompt).not.toContain("Session Handoff");
-
-		await hooks.session_before_compact({}, createMockCtx());
-
-		const result2 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result2.systemPrompt).toContain("Session Handoff");
-		// And it must now differ from the pre-compaction snapshot — that's the intentional cache boundary.
-		expect(result2.systemPrompt).not.toBe(result1.systemPrompt);
-	});
-
-	test("memory_write target=long_term does NOT refresh the snapshot (cache stays warm)", async () => {
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "OLD_FACT line", "utf-8");
-
-		const result1 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result1.systemPrompt).toContain("OLD_FACT");
-
-		await tools.memory_write.execute(
-			"tc1",
-			{ target: "long_term", content: "NEW_FACT_ABOUT_X", mode: "append" },
-			null,
-			null,
-			createMockCtx(),
-		);
-
-		// The write is already in tool-call history; re-rendering the block would
-		// rewrite the prompt tail and void the whole conversation's prefix cache.
-		const result2 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result2.systemPrompt).toBe(result1.systemPrompt);
-		expect(result2.systemPrompt).not.toContain("NEW_FACT_ABOUT_X");
-	});
-
-	test("PI_MEMORY_SNAPSHOT=refresh restores checkpoint refresh on long_term writes", async () => {
-		process.env.PI_MEMORY_SNAPSHOT = "refresh";
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "OLD_FACT line", "utf-8");
-
-		const result1 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result1.systemPrompt).toContain("OLD_FACT");
-
-		await tools.memory_write.execute(
-			"tc1",
-			{ target: "long_term", content: "NEW_FACT_ABOUT_X", mode: "append" },
-			null,
-			null,
-			createMockCtx(),
-		);
-
-		const result2 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result2.systemPrompt).toContain("NEW_FACT_ABOUT_X");
-		expect(result2.systemPrompt).not.toBe(result1.systemPrompt);
-	});
-
-	test("memory_forget refreshes the snapshot without persisting deleted content", async () => {
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "WRONG_FACT_ABOUT_Z\n\nkeep me\n", "utf-8");
-
-		const result1 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result1.systemPrompt).toContain("WRONG_FACT_ABOUT_Z");
-		expect(result1.message).toBeUndefined();
-
-		await tools.memory_forget.execute("tc1", { match: "WRONG_FACT_ABOUT_Z" }, null, null, {});
-
-		const result2 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result2.systemPrompt).not.toBe(result1.systemPrompt);
-		expect(result2.systemPrompt).not.toContain("WRONG_FACT_ABOUT_Z");
-		expect(result2.systemPrompt).toContain("keep me");
-		expect(result2.message).toBeUndefined();
-	});
-
-	test("memory_write target=daily does NOT mark snapshot dirty (cache stays warm)", async () => {
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "Stable long-term content", "utf-8");
-
-		const result1 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-
-		await tools.memory_write.execute(
-			"tc1",
-			{ target: "daily", content: "DAILY_NOTE_ABOUT_Y", mode: "append" },
-			null,
-			null,
-			createMockCtx(),
-		);
-
-		const result2 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		// Daily writes are echoed via tool-call args; snapshot must NOT churn.
-		expect(result2.systemPrompt).toBe(result1.systemPrompt);
-		expect(result2.systemPrompt).not.toContain("DAILY_NOTE_ABOUT_Y");
-	});
-
-	test("PI_MEMORY_SNAPSHOT=per-turn restores per-turn rebuild behavior", async () => {
-		process.env.PI_MEMORY_SNAPSHOT = "per-turn";
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "First content", "utf-8");
-
-		const result1 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result1.systemPrompt).toContain("First content");
-
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "Second content REPLACED", "utf-8");
-
-		const result2 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result2.systemPrompt).toContain("Second content REPLACED");
-		expect(result2.systemPrompt).not.toContain("First content");
-	});
-
-	test("session_start refreshes snapshot (resets module state across sessions)", async () => {
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "session-1 content", "utf-8");
-		const result1 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		expect(result1.systemPrompt).toContain("session-1 content");
-
-		// Simulate a new session: file changes, then session_start fires before next turn.
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "session-2 content", "utf-8");
-		_setExecFileForTest(((_file: string, _args: string[], _opts: any, cb: any) => {
-			cb(new Error("not available"), "", "");
-		}) as any);
-		try {
-			await hooks.session_start(
-				{},
-				{
-					hasUI: false,
-					sessionManager: { getSessionId: () => "newsess0" },
-					ui: { notify: () => {} },
-				},
-			);
-			const result2 = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-			expect(result2.systemPrompt).toContain("session-2 content");
-			expect(result2.systemPrompt).not.toContain("session-1 content");
-		} finally {
-			_resetExecFileForTest();
-		}
-	});
-
-	test("stable mode header carries a caveat with no volatile timestamp", async () => {
-		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "anything", "utf-8");
-		const result = await hooks.before_agent_start({ systemPrompt: "base" }, {});
-		// Reader-facing hint that ambient context may lag behind disk...
-		expect(result.systemPrompt).toContain("not re-read since");
-		expect(result.systemPrompt).toContain("memory_search");
-		// ...but no clock and no reason word: either would change the bytes
-		// between turns without the memory itself changing.
-		expect(result.systemPrompt).not.toMatch(/\d{2}:\d{2}:\d{2}/);
-	});
-});
-
-// ==========================================================================
-// 10. Extension registration
-// ==========================================================================
-
-describe("extension registration", () => {
-	test("registers all 7 tools", () => {
-		const mockPi = createMockPi();
-		registerExtension(mockPi.pi as any);
-		expect(Object.keys(mockPi.tools)).toHaveLength(7);
-		expect(mockPi.tools.memory_write).toBeDefined();
-		expect(mockPi.tools.memory_forget).toBeDefined();
-		expect(mockPi.tools.memory_restore).toBeDefined();
-		expect(mockPi.tools.memory_read).toBeDefined();
-		expect(mockPi.tools.scratchpad).toBeDefined();
-		expect(mockPi.tools.memory_search).toBeDefined();
-		expect(mockPi.tools.memory_status).toBeDefined();
-	});
-
-	test("registers all 4 lifecycle hooks", () => {
-		const mockPi = createMockPi();
-		registerExtension(mockPi.pi as any);
-		expect(mockPi.hooks.session_start).toBeDefined();
-		expect(mockPi.hooks.session_shutdown).toBeDefined();
-		expect(mockPi.hooks.before_agent_start).toBeDefined();
-		expect(mockPi.hooks.session_before_compact).toBeDefined();
-	});
-
-	test("tools have labels and descriptions", () => {
-		const mockPi = createMockPi();
-		registerExtension(mockPi.pi as any);
-		for (const name of [
-			"memory_write",
-			"memory_forget",
-			"memory_restore",
-			"memory_read",
-			"scratchpad",
-			"memory_search",
-			"memory_status",
-		]) {
-			expect(mockPi.tools[name].label).toBeTruthy();
-			expect(mockPi.tools[name].description).toBeTruthy();
-		}
 	});
 });
 
@@ -2559,9 +1734,7 @@ describe("memory_forget tool", () => {
 
 	beforeEach(() => {
 		setupTmpDir();
-		const mockPi = createMockPi();
-		tools = mockPi.tools;
-		registerExtension(mockPi.pi as any);
+		tools = memoryTools();
 	});
 
 	afterEach(cleanupTmpDir);
@@ -2769,7 +1942,14 @@ describe("probeEmbeddings", () => {
 
 function createMockPluginCtx() {
 	const handlers: Record<string, (event: any) => any> = {};
+	const addedTools: any[] = [];
 	const ctx = {
+		tool: {
+			transform(callback: (editor: { add: (tool: any) => void }) => void) {
+				callback({ add: (tool) => addedTools.push(tool) });
+				return Promise.resolve({ dispose: async () => {} });
+			},
+		},
 		session: {
 			hook(name: string, callback: (event: any) => any) {
 				handlers[name] = callback;
@@ -2781,7 +1961,7 @@ function createMockPluginCtx() {
 		},
 		location: { directory: process.cwd() },
 	};
-	return { ctx, handlers };
+	return { ctx, handlers, addedTools };
 }
 
 function makeSystemEvent(sessionID = "s1", system: Array<{ type: "text"; text: string }> = []) {
@@ -2790,6 +1970,7 @@ function makeSystemEvent(sessionID = "s1", system: Array<{ type: "text"; text: s
 
 describe("V2 setup (snapshot injection)", () => {
 	let handlers: Record<string, (event: any) => any>;
+	let addedTools: any[];
 	let clearSetup: (() => Promise<void> | void) | undefined;
 
 	beforeEach(async () => {
@@ -2798,6 +1979,7 @@ describe("V2 setup (snapshot injection)", () => {
 		_setQmdAvailable(false);
 		const mock = createMockPluginCtx();
 		handlers = mock.handlers;
+		addedTools = mock.addedTools;
 		clearSetup = await setup(mock.ctx as any);
 	});
 
@@ -2816,6 +1998,25 @@ describe("V2 setup (snapshot injection)", () => {
 	test("registers context and compaction hooks", () => {
 		expect(typeof handlers.context).toBe("function");
 		expect(typeof handlers.compaction).toBe("function");
+	});
+
+	test("registers all seven memory tools via ctx.tool.transform", () => {
+		expect(addedTools).toHaveLength(7);
+		expect(addedTools.map((tool) => tool.name).sort()).toEqual(
+			[
+				"memory_write",
+				"memory_forget",
+				"memory_restore",
+				"memory_read",
+				"scratchpad",
+				"memory_search",
+				"memory_status",
+			].sort(),
+		);
+		for (const tool of addedTools) {
+			expect(typeof tool.execute).toBe("function");
+			expect(tool.input.type).toBe("object");
+		}
 	});
 
 	test("appends the snapshot once and replaces it on later turns", () => {
@@ -2850,8 +2051,7 @@ describe("V2 setup (snapshot injection)", () => {
 	});
 
 	test("long-term write marks sessions dirty so the next turn rebuilds", async () => {
-		const mockPi = createMockPi();
-		registerExtension(mockPi.pi as any);
+		const mockPi = { tools: memoryTools() };
 		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "the old fact\n", "utf-8");
 
 		const event = makeSystemEvent("s1");
@@ -2874,8 +2074,7 @@ describe("V2 setup (snapshot injection)", () => {
 	});
 
 	test("memory_forget and memory_restore mark sessions dirty", async () => {
-		const mockPi = createMockPi();
-		registerExtension(mockPi.pi as any);
+		const mockPi = { tools: memoryTools() };
 		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "<!-- ts [s] -->\nsecret fact\n\nkeep me\n", "utf-8");
 
 		const event = makeSystemEvent("s1");
@@ -2906,8 +2105,7 @@ describe("V2 setup (snapshot injection)", () => {
 	});
 
 	test("daily and scratchpad writes leave the snapshot clean", async () => {
-		const mockPi = createMockPi();
-		registerExtension(mockPi.pi as any);
+		const mockPi = { tools: memoryTools() };
 		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "durable fact\n", "utf-8");
 
 		const event = makeSystemEvent("s1");

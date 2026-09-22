@@ -23,7 +23,7 @@
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { _clearUpdateTimer, registerExtension, resolveActiveMemoryDir } from "../index.js";
+import { _clearUpdateTimer, MEMORY_TOOLS, resolveActiveMemoryDir } from "../index.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -62,18 +62,14 @@ interface PiResult {
 
 function registeredTools(): Record<string, any> {
 	const tools: Record<string, any> = {};
-	const pi = {
-		registerTool(tool: { name?: unknown }) {
-			if (typeof tool.name === "string") {
-				tools[tool.name] = tool;
-			}
-		},
-		on(_event: string, _handler: unknown) {
-			// Hooks are irrelevant for direct tool execution in these tests.
-		},
-	};
-
-	registerExtension(pi as any);
+	for (const tool of MEMORY_TOOLS) {
+		tools[tool.name] = {
+			...tool,
+			// e2e's runTool still calls the old 5-arg shape; adapt to the internal
+			// execute(params, ctx) signature.
+			execute: (_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) => tool.execute(params, ctx),
+		};
+	}
 	return tools;
 }
 

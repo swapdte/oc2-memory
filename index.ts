@@ -1,11 +1,11 @@
 /**
- * Memory Extension with QMD-Powered Search
+ * Memory plugin for OpenCode, with qmd-powered search when it is available
  *
- * Plain-Markdown memory system with semantic search via qmd.
- * Core memory tools (write/read/scratchpad) work without qmd installed.
- * The memory_search tool requires qmd for keyword, semantic, and hybrid search.
+ * Plain-Markdown memory system. The core tools (write/read/scratchpad) and
+ * memory_search all work without qmd — search falls back to reading the
+ * Markdown files directly. qmd adds keyword, semantic and deep search on top.
  *
- * Layout (under ~/.pi/agent/memory/):
+ * Layout (under ~/.pi/agent/memory/, or ~/.oc2-memory/ when that folder is absent):
  *   MEMORY.md              — curated long-term memory (decisions, preferences, durable facts)
  *   SCRATCHPAD.md           — checklist of things to keep in mind / fix later
  *   daily/YYYY-MM-DD.md    — daily append-only log (today + yesterday loaded at session start)
@@ -27,15 +27,6 @@ import { type ExecFileOptions, execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type Message, StringEnum, Type } from "@earendil-works/pi-ai";
-import { complete } from "@earendil-works/pi-ai/compat";
-import {
-	convertToLlm,
-	type ExtensionAPI,
-	type ExtensionContext,
-	type SessionEntry,
-	serializeConversation,
-} from "@earendil-works/pi-coding-agent";
 import type { Plugin } from "@opencode/plugin";
 
 // ---------------------------------------------------------------------------
@@ -205,14 +196,6 @@ const CONTEXT_SEARCH_MAX_CHARS = 2_500;
 const CONTEXT_SEARCH_MAX_LINES = 80;
 const CONTEXT_MAX_CHARS = 16_000;
 
-const EXIT_SUMMARY_MAX_CHARS = 80_000;
-const EXIT_SUMMARY_MIN_MESSAGES = 4;
-const EXIT_SUMMARY_SYSTEM_PROMPT = [
-	"You are a session recap assistant.",
-	"Read the conversation and extract key decisions, lessons learned, notes, and follow-ups.",
-	"Return ONLY markdown in the specified format, without any extra commentary.",
-].join("\n");
-
 type TruncateMode = "start" | "end" | "middle";
 
 interface PreviewResult {
@@ -342,271 +325,12 @@ function formatContextSection(label: string, content: string, mode: TruncateMode
 	return `${label}\n\n${result.preview}${note}`;
 }
 
-type ExitSummaryReason = "ctrl+d" | "slash-quit" | "session-end";
-
-interface ExitSummaryResult {
-	summary: string | null;
-	error?: string;
-	hasMessages: boolean;
-}
-
-function formatExitSummaryReason(reason: ExitSummaryReason): string {
-	if (reason === "ctrl+d") return "ctrl+d";
-	if (reason === "slash-quit") return "/quit";
-	return "session-end";
-}
-
-function truncateConversationForSummary(conversationText: string): {
-	text: string;
-	truncated: boolean;
-	totalChars: number;
-} {
-	const trimmed = conversationText.trim();
-	if (!trimmed) {
-		return { text: "", truncated: false, totalChars: 0 };
-	}
-	const truncated = truncateText(trimmed, EXIT_SUMMARY_MAX_CHARS, "end");
-	return {
-		text: truncated.text,
-		truncated: truncated.truncated,
-		totalChars: trimmed.length,
-	};
-}
-
-function buildExitSummaryPrompt(conversationText: string, truncated: boolean, totalChars: number): string {
-	const lines = [
-		"Review the conversation and extract important decisions, lessons learned, notes, and follow-ups for a daily log.",
-		"Return markdown only with these exact headings:",
-		"### Decisions",
-		"### Lessons Learned",
-		"### Notes",
-		"### Follow-ups",
-		'Use bullet points under each heading. If there is nothing, write "None.".',
-	];
-
-	if (truncated) {
-		lines.push(
-			`Note: Conversation transcript was truncated to the most recent ${conversationText.length} of ${totalChars} characters.`,
-		);
-	}
-
-	lines.push("", "<conversation>", conversationText, "</conversation>");
-	return lines.join("\n");
-}
-
-function formatExitSummaryEntry(
-	summary: string,
-	reason: ExitSummaryReason,
-	sessionId: string,
-	timestamp: string,
-): string {
-	const header = `## Session Summary (auto, exit: ${formatExitSummaryReason(reason)})`;
-	return [`<!-- ${timestamp} [${sessionId}] -->`, header, "", summary.trim()].join("\n");
-}
-
-function getSessionBranch(ctx: ExtensionContext): SessionEntry[] | null {
-	const sessionManager = ctx.sessionManager as ExtensionContext["sessionManager"] & {
-		getBranch?: () => SessionEntry[];
-	};
-	if (typeof sessionManager?.getBranch !== "function") {
-		return null;
-	}
-	return sessionManager.getBranch();
-}
-
-async function resolveExitSummaryApiKey(
-	ctx: ExtensionContext,
-	model: NonNullable<ExtensionContext["model"]>,
-): Promise<string | undefined> {
-	const modelRegistry = ctx.modelRegistry as ExtensionContext["modelRegistry"] & {
-		getApiKey?: (model: NonNullable<ExtensionContext["model"]>) => Promise<string | undefined>;
-		getApiKeyForProvider?: (provider: string) => Promise<string | undefined>;
-	};
-
-	if (typeof modelRegistry?.getApiKey === "function") {
-		return modelRegistry.getApiKey(model);
-	}
-
-	if (typeof modelRegistry?.getApiKeyForProvider === "function") {
-		return modelRegistry.getApiKeyForProvider(model.provider);
-	}
-
-	return undefined;
-}
-
-/**
- * Model used for exit summaries. Defaults to the session's active model;
- * PI_MEMORY_EXIT_SUMMARY_MODEL="provider/model-id" overrides it (e.g. to a
- * cheaper/faster model). Unresolvable specs fall back to the session model.
- */
-function resolveExitSummaryModel(ctx: ExtensionContext): ExtensionContext["model"] {
-	const spec = (process.env.PI_MEMORY_EXIT_SUMMARY_MODEL ?? "").trim();
-	if (!spec) return ctx.model;
-
-	const slash = spec.indexOf("/");
-	const modelRegistry = ctx.modelRegistry as ExtensionContext["modelRegistry"] & {
-		find?: (provider: string, modelId: string) => ExtensionContext["model"];
-	};
-	const found = slash > 0 ? modelRegistry?.find?.(spec.slice(0, slash), spec.slice(slash + 1)) : undefined;
-	if (found) return found;
-
-	if (ctx.hasUI) {
-		try {
-			ctx.ui.notify(
-				`pi-memory: PI_MEMORY_EXIT_SUMMARY_MODEL "${spec}" not resolved; using session model`,
-				"warning",
-			);
-		} catch {
-			/* UI may already be tearing down during shutdown */
-		}
-	}
-	return ctx.model;
-}
-
-async function generateExitSummary(ctx: ExtensionContext): Promise<ExitSummaryResult> {
-	const branch = getSessionBranch(ctx);
-	if (!branch) {
-		return { summary: null, error: "Session branch unavailable", hasMessages: false };
-	}
-
-	const messages = branch
-		.filter((entry): entry is SessionEntry & { type: "message" } => entry.type === "message")
-		.map((entry) => entry.message);
-
-	// Curated-write gate: auto-summarizing trivial sessions (a lone `ls`, a
-	// one-liner Q&A) appends noise the daily-log injection and search then
-	// faithfully resurface forever. Only sessions with enough exchange to
-	// plausibly contain decisions/lessons earn an automatic summary.
-	if (messages.length < EXIT_SUMMARY_MIN_MESSAGES) {
-		return { summary: null, hasMessages: false };
-	}
-
-	const model = resolveExitSummaryModel(ctx);
-	if (!model) {
-		return { summary: null, error: "No active model", hasMessages: true };
-	}
-
-	const apiKey = await resolveExitSummaryApiKey(ctx, model);
-	if (!apiKey) {
-		return {
-			summary: null,
-			error: `API key resolution unavailable for ${model.provider}/${model.id}`,
-			hasMessages: true,
-		};
-	}
-
-	const llmMessages = convertToLlm(messages);
-	const conversationText = serializeConversation(llmMessages);
-	const { text: truncatedText, truncated, totalChars } = truncateConversationForSummary(conversationText);
-	if (!truncatedText.trim()) {
-		return { summary: null, error: "No conversation text to summarize", hasMessages: true };
-	}
-
-	const summaryMessages: Message[] = [
-		{
-			role: "user",
-			content: [{ type: "text", text: buildExitSummaryPrompt(truncatedText, truncated, totalChars) }],
-			timestamp: Date.now(),
-		},
-	];
-
-	try {
-		const response = await complete(
-			model,
-			{ systemPrompt: EXIT_SUMMARY_SYSTEM_PROMPT, messages: summaryMessages },
-			{ apiKey, reasoningEffort: getExitSummaryReasoningEffort() },
-		);
-
-		const summaryText = response.content
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map((c) => c.text)
-			.join("\n")
-			.trim();
-
-		if (!summaryText) {
-			return { summary: null, error: "Summary was empty", hasMessages: true };
-		}
-
-		return { summary: summaryText, hasMessages: true };
-	} catch (err) {
-		return { summary: null, error: err instanceof Error ? err.message : String(err), hasMessages: true };
-	}
-}
-
 function getQmdUpdateMode(): "background" | "manual" | "off" {
 	const mode = (process.env.PI_MEMORY_QMD_UPDATE ?? "background").toLowerCase();
 	if (mode === "manual" || mode === "off" || mode === "background") {
 		return mode;
 	}
 	return "background";
-}
-
-export function shouldSummarizeLifecycleTransitions(): boolean {
-	const value = (process.env.PI_MEMORY_SUMMARIZE_TRANSITIONS ?? "").toLowerCase();
-	return value === "1" || value === "true" || value === "yes" || value === "on";
-}
-
-/**
- * Exit summaries on real quit (Ctrl+D, /quit, session end) can be disabled
- * with PI_MEMORY_EXIT_SUMMARY=0 (aliases: off/false/no). Default: enabled.
- */
-export function isExitSummaryEnabled(): boolean {
-	const value = (process.env.PI_MEMORY_EXIT_SUMMARY ?? "").trim().toLowerCase();
-	return !(value === "0" || value === "off" || value === "false" || value === "no");
-}
-
-/**
- * True when a generated exit summary carries no actual content — every section
- * is empty or "None.". The summary prompt instructs the model to write "None."
- * under each heading when nothing is worth recording; persisting those blocks
- * would pollute the daily log (re-injected every session start) and the qmd
- * index with boilerplate.
- */
-export function isExitSummaryEmpty(summary: string): boolean {
-	const contentLines = summary
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => line.length > 0 && !line.startsWith("#"));
-	if (contentLines.length === 0) return true;
-	return contentLines.every((line) => /^none\.?$/i.test(line.replace(/^[-*+]\s*/, "")));
-}
-
-const DEFAULT_EXIT_SUMMARY_TIMEOUT_MS = 10_000;
-
-/**
- * Self-imposed timeout for the exit-summary work on session_shutdown. Pi core
- * awaits shutdown handlers with no timeout, and generateExitSummary() is only
- * bounded by the provider's own timeout — a hanging provider would otherwise
- * block quitting indefinitely. Override with PI_MEMORY_EXIT_SUMMARY_TIMEOUT_MS.
- */
-export function getExitSummaryTimeoutMs(): number {
-	const configured = Number(process.env.PI_MEMORY_EXIT_SUMMARY_TIMEOUT_MS);
-	return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_EXIT_SUMMARY_TIMEOUT_MS;
-}
-
-const DEFAULT_EXIT_SUMMARY_REASONING_EFFORT = "low";
-
-/**
- * Reasoning effort passed to the exit-summary LLM call. Defaults to "low".
- *
- * Some providers reject certain efforts — e.g. Baseten's GLM-5.2 only accepts
- * "high"/"max"/"none" and returns HTTP 400 for "low", silently breaking exit
- * summaries (the error is caught, summary is null, nothing is persisted).
- * Override with PI_MEMORY_EXIT_SUMMARY_REASONING_EFFORT to a value the
- * configured PI_MEMORY_EXIT_SUMMARY_MODEL accepts. Set to "off" to omit the
- * parameter entirely and let the provider apply its own default.
- */
-export function getExitSummaryReasoningEffort(): string | undefined {
-	const value = (process.env.PI_MEMORY_EXIT_SUMMARY_REASONING_EFFORT ?? "").trim().toLowerCase();
-	if (value === "off") return undefined;
-	if (value === "") return DEFAULT_EXIT_SUMMARY_REASONING_EFFORT;
-	return value;
-}
-
-export function shouldSkipExitSummaryForReason(reason: string | undefined): boolean {
-	if (!reason) return false;
-	if (shouldSummarizeLifecycleTransitions()) return false;
-	return ["reload", "new", "resume", "fork"].includes(reason);
 }
 
 async function ensureQmdAvailableForUpdate(): Promise<boolean> {
@@ -1038,8 +762,6 @@ export function getEmbedProbeTimeoutMs(env: NodeJS.ProcessEnv = process.env): nu
 	return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_EMBED_PROBE_TIMEOUT_MS;
 }
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
-let exitSummaryReason: ExitSummaryReason | null = null;
-let terminalInputUnsubscribe: (() => void) | null = null;
 
 /** Override execFile implementation (for testing). */
 export function _setExecFileForTest(fn: ExecFileFn) {
@@ -1091,7 +813,7 @@ export function qmdInstallInstructions(): string {
 		"  npm install -g @tobilu/qmd        # no Bun needed",
 		`  bun install -g ${QMD_REPO_URL}   # ensure ~/.bun/bin is on PATH`,
 		"",
-		"The extension auto-creates the collection on next session start.",
+		"The plugin auto-creates the collection on next session start.",
 		"To set it up manually instead:",
 		`  qmd collection add ${MEMORY_DIR} --name pi-memory`,
 		"  qmd embed",
@@ -1249,16 +971,6 @@ export function scheduleQmdUpdate() {
 		updateTimer = null;
 		execFileFn("qmd", ["update"], { timeout: 30_000 }, () => ensureQmdEmbed());
 	}, 500);
-}
-
-async function runQmdUpdateNow() {
-	if (getQmdUpdateMode() !== "background") return;
-	if (!qmdAvailable) return;
-	await new Promise<void>((resolve) => {
-		execFileFn("qmd", ["update"], { timeout: 30_000 }, () => resolve());
-	});
-	// Embeds for the final writes are picked up by the session_start catch-up
-	// embed; not chained here so shutdown stays fast.
 }
 
 /** Search for memories relevant to the user's prompt. Returns formatted markdown or empty string on error. */
@@ -1589,19 +1301,10 @@ export function getMemoryInventory(): {
 // emit the same bytes for every turn in between.
 // ---------------------------------------------------------------------------
 
-let memorySnapshot: string | null = null;
-let snapshotTakenAt: string | null = null;
-let snapshotTakenOnDate: string | null = null;
-let snapshotReason: string | null = null;
-let snapshotDirty = false;
-function refreshMemorySnapshot(reason: string) {
-	memorySnapshot = buildMemoryContext("");
-	snapshotTakenAt = nowTimestamp();
-	snapshotTakenOnDate = todayStr();
-	snapshotReason = reason;
-	snapshotDirty = false;
-}
-
+/**
+ * Snapshot mode configuration (PI_MEMORY_SNAPSHOT). Kept for Phase 4 — the V2
+ * snapshot cache that consumes it lives further down.
+ */
 function getSnapshotMode(): "stable" | "refresh" | "per-turn" {
 	const mode = (process.env.PI_MEMORY_SNAPSHOT ?? "stable").toLowerCase();
 	if (mode === "per-turn") return "per-turn";
@@ -1609,246 +1312,43 @@ function getSnapshotMode(): "stable" | "refresh" | "per-turn" {
 	return "stable";
 }
 
-/** Reset snapshot state (for testing). */
-export function _resetMemorySnapshot() {
-	memorySnapshot = null;
-	snapshotTakenAt = null;
-	snapshotTakenOnDate = null;
-	snapshotReason = null;
-	snapshotDirty = false;
+// ---------------------------------------------------------------------------
+// Memory tools
+//
+// The seven definitions are OpenCode-agnostic: each keeps an internal
+// execute(params, ctx) returning the internal `{ content, isError?, details }`
+// shape, so the bodies stay free of any host framework and remain directly
+// testable. `toOpenCodeTool` adapts them to the V2 Tool.Result boundary only at
+// registration time.
+// ---------------------------------------------------------------------------
+
+interface MemoryToolResult {
+	content: { type: "text"; text: string }[];
+	isError?: boolean;
+	details: Record<string, unknown>;
 }
 
-// ---------------------------------------------------------------------------
-// Extension entry point
-// ---------------------------------------------------------------------------
+interface MemoryToolContext {
+	sessionManager: { getSessionId(): string };
+}
 
-export function registerExtension(pi: ExtensionAPI) {
-	// --- session_start: detect qmd, auto-setup collection ---
-	pi.on("session_start", async (_event, ctx) => {
-		exitSummaryReason = null;
-		if (terminalInputUnsubscribe) {
-			terminalInputUnsubscribe();
-			terminalInputUnsubscribe = null;
-		}
-		if (ctx.hasUI) {
-			terminalInputUnsubscribe = ctx.ui.onTerminalInput((data) => {
-				if (!data.includes("\u0004")) return undefined;
-				if (!ctx.isIdle()) return undefined;
-				if (ctx.ui.getEditorText().trim()) return undefined;
-				exitSummaryReason = "ctrl+d";
-				return undefined;
-			});
-		}
+interface MemoryToolInput {
+	type: "object";
+	properties: Record<string, unknown>;
+	required: string[];
+	additionalProperties: false;
+}
 
-		qmdAvailable = await detectQmd();
-		if (!qmdAvailable) {
-			if (ctx.hasUI) {
-				ctx.ui.notify(qmdInstallInstructions(), "info");
-			}
-			refreshMemorySnapshot("session_start");
-			return;
-		}
+interface MemoryToolDefinition {
+	name: string;
+	description: string;
+	input: MemoryToolInput;
+	execute: (params: any, ctx: MemoryToolContext) => Promise<MemoryToolResult>;
+}
 
-		const hasCollection = await checkCollection("pi-memory");
-		if (!hasCollection) {
-			await setupQmdCollection();
-		}
-		// Catch-up embed: covers writes from previous sessions (shutdown skips
-		// embedding) and fresh installs where the collection exists but was
-		// never embedded. Incremental, so a no-op when already current.
-		ensureQmdEmbed();
-		refreshMemorySnapshot("session_start");
-	});
-
-	// --- session_shutdown: write exit summary + clean up timer ---
-	pi.on("session_shutdown", async (event, ctx) => {
-		const shutdownReason = (event as { reason?: string }).reason;
-
-		if (terminalInputUnsubscribe) {
-			terminalInputUnsubscribe();
-			terminalInputUnsubscribe = null;
-		}
-
-		// Lifecycle transitions are usually not final session exits. By default,
-		// avoid generating LLM summaries and running qmd updates during /reload,
-		// /new, /resume, and /fork because that makes those transitions slow.
-		// Users who prefer the old behavior can opt in with
-		// PI_MEMORY_SUMMARIZE_TRANSITIONS=1.
-		if (shouldSkipExitSummaryForReason(shutdownReason) || !isExitSummaryEnabled()) {
-			exitSummaryReason = null;
-			if (updateTimer) {
-				clearTimeout(updateTimer);
-				updateTimer = null;
-			}
-			return;
-		}
-
-		const reason = exitSummaryReason ?? "session-end";
-		exitSummaryReason = null;
-
-		let summaryTimer: ReturnType<typeof setTimeout> | undefined;
-		try {
-			if (reason) {
-				ensureDirs();
-				// Race the summary against a self-imposed timeout: pi core awaits
-				// shutdown handlers with no timeout, so a hanging provider would
-				// otherwise block quitting indefinitely. On expiry nothing is
-				// persisted (the late result, if any, is simply dropped).
-				const summaryWork = generateExitSummary(ctx);
-				const expired = new Promise<null>((resolve) => {
-					summaryTimer = setTimeout(() => resolve(null), getExitSummaryTimeoutMs());
-				});
-				const result = await Promise.race([summaryWork, expired]);
-				// Only persist real summaries. The old fallback appended an
-				// all-"None." boilerplate block on every failed summarization
-				// (no API key, empty response, …), polluting the daily log —
-				// which is then re-injected into context every session start.
-				// Successful-but-empty summaries (every section "None.") are
-				// filtered out for the same reason.
-				if (result?.hasMessages && result.summary && !isExitSummaryEmpty(result.summary)) {
-					const summary = result.summary;
-					const sid = shortSessionId(ctx.sessionManager.getSessionId());
-					const ts = nowTimestamp();
-					const entry = formatExitSummaryEntry(summary, reason, sid, ts);
-					const filePath = dailyPath(todayStr());
-					const existing = readFileSafe(filePath) ?? "";
-					const separator = existing.trim() ? "\n\n" : "";
-					fs.writeFileSync(filePath, existing + separator + entry, "utf-8");
-					await ensureQmdAvailableForUpdate();
-					await runQmdUpdateNow();
-				}
-			}
-		} finally {
-			if (summaryTimer) clearTimeout(summaryTimer);
-			if (updateTimer) {
-				clearTimeout(updateTimer);
-				updateTimer = null;
-			}
-		}
-	});
-
-	// --- input: detect /quit for shutdown summary ---
-	pi.on("input", async (event, _ctx) => {
-		if (event.source !== "extension" && event.text.trim() === "/quit") {
-			exitSummaryReason = "slash-quit";
-		}
-		return { action: "continue" };
-	});
-
-	// --- Inject memory context before every agent turn ---
-	pi.on("before_agent_start", async (event, _ctx) => {
-		const mode = getSnapshotMode();
-
-		let memoryContext: string;
-		let snapshotCaveat = "";
-
-		if (mode === "per-turn") {
-			const skipSearch = process.env.PI_MEMORY_NO_SEARCH === "1";
-			const searchResults = skipSearch ? "" : await searchRelevantMemories(event.prompt ?? "");
-			memoryContext = buildMemoryContext(searchResults);
-		} else {
-			// "stable" means stable: once taken, the block is emitted byte-for-byte
-			// for the rest of the session. Refreshing on a long-term write or a
-			// midnight rollover rewrites the tail of the system prompt and voids the
-			// whole conversation's prefix cache — the exact cost the snapshot exists
-			// to avoid, paid on the single most common in-session event. The fresh
-			// state is not lost: the write is in tool-call history a few messages
-			// back, deletions are sent as a correction message below, and
-			// memory_read / memory_search reach the files directly. "refresh" restores the old
-			// checkpoint behaviour.
-			const today = todayStr();
-			const stale = mode === "refresh" && (snapshotDirty || snapshotTakenOnDate !== today);
-			if (memorySnapshot === null || stale) {
-				const reason =
-					memorySnapshot === null ? "before_agent_start" : snapshotDirty ? "long_term_write" : "day_rollover";
-				refreshMemorySnapshot(reason);
-			}
-			memoryContext = memorySnapshot ?? "";
-			// Deliberately carries no timestamp and no reason word: both change
-			// between turns without the memory itself changing, which is enough on
-			// its own to invalidate the cache this branch is trying to preserve.
-			snapshotCaveat =
-				mode === "refresh"
-					? `Snapshot ${snapshotReason} at ${snapshotTakenAt}. ` +
-						"Use memory_read / memory_search for the authoritative latest state; " +
-						"recent writes may also be visible in tool-call history."
-					: "Loaded once at session start and not re-read since. Use memory_read / memory_search " +
-						"for the authoritative latest state; anything written this session is in tool-call history.";
-		}
-
-		if (!memoryContext) return;
-
-		const headerLines = ["\n\n## Memory"];
-		if (snapshotCaveat) headerLines.push(`(${snapshotCaveat})`);
-		headerLines.push(
-			"The following memory files have been loaded. Use the memory_write tool to persist important information.",
-			"- Decisions, preferences, and durable facts \u2192 MEMORY.md",
-			"- Day-to-day notes and running context \u2192 daily/<YYYY-MM-DD>.md",
-			"- Things to fix later or keep in mind \u2192 scratchpad tool",
-			"- Use memory_search to find past context across all memory files (keyword, semantic, or deep search).",
-			"- Use #tags (e.g. #decision, #preference) and [[links]] (e.g. [[auth-strategy]]) in memory content to improve future search recall.",
-			'- If someone says "remember this," write it immediately.',
-			"",
-			memoryContext,
-		);
-
-		return {
-			systemPrompt: event.systemPrompt + headerLines.join("\n"),
-		};
-	});
-
-	// --- Pre-compaction: auto-capture session handoff ---
-	pi.on("session_before_compact", async (_event, ctx) => {
-		ensureDirs();
-		const sid = shortSessionId(ctx.sessionManager.getSessionId());
-		const ts = nowTimestamp();
-		const parts: string[] = [];
-
-		// Capture open scratchpad items
-		const scratchpad = readFileSafe(SCRATCHPAD_FILE);
-		if (scratchpad?.trim()) {
-			const openItems = parseScratchpad(scratchpad).filter((i) => !i.done);
-			if (openItems.length > 0) {
-				parts.push("**Open scratchpad items:**");
-				for (const item of openItems) {
-					parts.push(`- [ ] ${item.text}`);
-				}
-			}
-		}
-
-		// Capture last few lines from today's daily log
-		const todayContent = readFileSafe(dailyPath(todayStr()));
-		if (todayContent?.trim()) {
-			const lines = todayContent.trim().split("\n");
-			const tail = lines.slice(-15).join("\n");
-			parts.push(`**Recent daily log context:**\n${tail}`);
-		}
-
-		// Intentional cache boundary: compaction drops tool history, so the
-		// snapshot must catch up to disk on every compaction — even when no
-		// handoff is written. Otherwise stale pre-compaction state (e.g. a
-		// completed scratchpad item that no longer appears in the snapshot
-		// source files) would keep being injected.
-		try {
-			if (parts.length === 0) return;
-
-			const handoff = [`<!-- HANDOFF ${ts} [${sid}] -->`, "## Session Handoff", ...parts].join("\n");
-
-			const filePath = dailyPath(todayStr());
-			const existing = readFileSafe(filePath) ?? "";
-			const separator = existing.trim() ? "\n\n" : "";
-			fs.writeFileSync(filePath, existing + separator + handoff, "utf-8");
-			await ensureQmdAvailableForUpdate();
-			scheduleQmdUpdate();
-		} finally {
-			refreshMemorySnapshot("session_before_compact");
-		}
-	});
-
-	// --- memory_write tool ---
-	pi.registerTool({
+export const MEMORY_TOOLS: MemoryToolDefinition[] = [
+	{
 		name: "memory_write",
-		label: "Memory Write",
 		description: [
 			"Write to memory files. Two targets:",
 			"- 'long_term': Write to MEMORY.md (curated durable facts, decisions, preferences). Mode: 'append' or 'overwrite'.",
@@ -1856,18 +1356,25 @@ export function registerExtension(pi: ExtensionAPI) {
 			"Use this when the user asks you to remember something, or when you learn important preferences/decisions.",
 			"Use #tags (e.g. #decision, #preference, #lesson, #bug) and [[links]] (e.g. [[auth-strategy]]) in content to improve searchability.",
 		].join("\n"),
-		parameters: Type.Object({
-			target: StringEnum(["long_term", "daily"] as const, {
-				description: "Where to write: 'long_term' for MEMORY.md, 'daily' for today's daily log",
-			}),
-			content: Type.String({ description: "Content to write (Markdown)" }),
-			mode: Type.Optional(
-				StringEnum(["append", "overwrite"] as const, {
+		input: {
+			type: "object",
+			properties: {
+				target: {
+					type: "string",
+					enum: ["long_term", "daily"],
+					description: "Where to write: 'long_term' for MEMORY.md, 'daily' for today's daily log",
+				},
+				content: { type: "string", description: "Content to write (Markdown)" },
+				mode: {
+					type: "string",
+					enum: ["append", "overwrite"],
 					description: "Write mode for long_term target. Default: 'append'. Daily always appends.",
-				}),
-			),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				},
+			},
+			required: ["target", "content"],
+			additionalProperties: false,
+		},
+		async execute(params, ctx) {
 			ensureDirs();
 			const { target, content, mode } = params;
 			const sid = shortSessionId(ctx.sessionManager.getSessionId());
@@ -1921,10 +1428,9 @@ export function registerExtension(pi: ExtensionAPI) {
 				: "\n\nMEMORY.md was empty.";
 
 			// Long-term writes change the ambient "background context" the model
-			// should always see. Mark snapshot dirty so the next turn refreshes.
-			// Daily writes are high-frequency and already echoed via tool-call
-			// args — they are intentionally NOT marked dirty.
-			snapshotDirty = true;
+			// should always see. Mark session snapshots dirty so the next turn
+			// refreshes. Daily writes are high-frequency and already echoed via
+			// tool-call args — they are intentionally NOT marked dirty.
 			markAllSessionsDirty();
 
 			if (mode === "overwrite") {
@@ -1965,12 +1471,9 @@ export function registerExtension(pi: ExtensionAPI) {
 				},
 			};
 		},
-	});
-
-	// --- scratchpad tool ---
-	pi.registerTool({
+	},
+	{
 		name: "scratchpad",
-		label: "Scratchpad",
 		description: [
 			"Manage a checklist of things to fix later or keep in mind. Actions:",
 			"- 'add': Add a new unchecked item (- [ ] text)",
@@ -1979,17 +1482,23 @@ export function registerExtension(pi: ExtensionAPI) {
 			"- 'clear_done': Remove all checked items from the list.",
 			"- 'list': Show all items.",
 		].join("\n"),
-		parameters: Type.Object({
-			action: StringEnum(["add", "done", "undo", "clear_done", "list"] as const, {
-				description: "What to do",
-			}),
-			text: Type.Optional(
-				Type.String({
+		input: {
+			type: "object",
+			properties: {
+				action: {
+					type: "string",
+					enum: ["add", "done", "undo", "clear_done", "list"],
+					description: "What to do",
+				},
+				text: {
+					type: "string",
 					description: "Item text for add, or substring to match for done/undo",
-				}),
-			),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				},
+			},
+			required: ["action"],
+			additionalProperties: false,
+		},
+		async execute(params, ctx) {
 			ensureDirs();
 			const { action, text } = params;
 			const sid = shortSessionId(ctx.sessionManager.getSessionId());
@@ -2143,12 +1652,9 @@ export function registerExtension(pi: ExtensionAPI) {
 				details: {},
 			};
 		},
-	});
-
-	// --- memory_read tool ---
-	pi.registerTool({
+	},
+	{
 		name: "memory_read",
-		label: "Memory Read",
 		description: [
 			"Read a memory file. Targets:",
 			"- 'long_term': Read MEMORY.md",
@@ -2156,17 +1662,23 @@ export function registerExtension(pi: ExtensionAPI) {
 			"- 'daily': Read a specific day's log (default: today). Pass date as YYYY-MM-DD.",
 			"- 'list': List all daily log files.",
 		].join("\n"),
-		parameters: Type.Object({
-			target: StringEnum(["long_term", "scratchpad", "daily", "list"] as const, {
-				description: "What to read",
-			}),
-			date: Type.Optional(
-				Type.String({
+		input: {
+			type: "object",
+			properties: {
+				target: {
+					type: "string",
+					enum: ["long_term", "scratchpad", "daily", "list"],
+					description: "What to read",
+				},
+				date: {
+					type: "string",
 					description: "Date for daily log (YYYY-MM-DD). Default: today.",
-				}),
-			),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+				},
+			},
+			required: ["target"],
+			additionalProperties: false,
+		},
+		async execute(params, _ctx) {
 			ensureDirs();
 			const { target, date } = params;
 
@@ -2255,12 +1767,9 @@ export function registerExtension(pi: ExtensionAPI) {
 				details: { path: MEMORY_FILE },
 			};
 		},
-	});
-
-	// --- memory_forget tool ---
-	pi.registerTool({
+	},
+	{
 		name: "memory_forget",
-		label: "Memory Forget",
 		description: [
 			"Delete outdated or incorrect facts from memory. Removes every entry/paragraph",
 			"containing the match string (case-insensitive substring) from MEMORY.md, or from",
@@ -2269,20 +1778,27 @@ export function registerExtension(pi: ExtensionAPI) {
 			"Use this when the user corrects a stored fact or a memory is no longer true —",
 			"stale entries keep resurfacing in retrieval and cause confidently wrong answers.",
 		].join("\n"),
-		parameters: Type.Object({
-			match: Type.String({
-				description: "Case-insensitive substring identifying the fact(s) to remove",
-			}),
-			target: Type.Optional(
-				StringEnum(["long_term", "daily"] as const, {
+		input: {
+			type: "object",
+			properties: {
+				match: {
+					type: "string",
+					description: "Case-insensitive substring identifying the fact(s) to remove",
+				},
+				target: {
+					type: "string",
+					enum: ["long_term", "daily"],
 					description: "Where to delete from: 'long_term' (MEMORY.md, default) or 'daily'",
-				}),
-			),
-			date: Type.Optional(
-				Type.String({ description: "Daily log date (YYYY-MM-DD) when target='daily'. Default: today." }),
-			),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+				},
+				date: {
+					type: "string",
+					description: "Daily log date (YYYY-MM-DD) when target='daily'. Default: today.",
+				},
+			},
+			required: ["match"],
+			additionalProperties: false,
+		},
+		async execute(params, _ctx) {
 			ensureDirs();
 			const target: MemoryTarget = params.target ?? "long_term";
 			if (!params.match.trim()) {
@@ -2329,11 +1845,8 @@ export function registerExtension(pi: ExtensionAPI) {
 			// If either write fails, we never report a successful unrecoverable deletion.
 			const recovery = writeRecoveryRecord(target, recoveryDate, result.removed);
 			fs.writeFileSync(filePath, result.content, "utf-8");
-			// Forget is a privacy-sensitive mutation. Refresh the snapshot immediately
-			// so deleted content disappears from authoritative context without being
-			// copied into persisted correction messages. This intentionally spends one
-			// cache invalidation on an explicit deletion.
-			refreshMemorySnapshot("memory_forget");
+			// Forget is a privacy-sensitive mutation. Invalidate every live session's
+			// snapshot so deleted content disappears from authoritative context.
 			markAllSessionsDirty();
 			await ensureQmdAvailableForUpdate();
 			scheduleQmdUpdate();
@@ -2364,20 +1877,22 @@ export function registerExtension(pi: ExtensionAPI) {
 				},
 			};
 		},
-	});
-
-	// --- memory_restore tool ---
-	pi.registerTool({
+	},
+	{
 		name: "memory_restore",
-		label: "Memory Restore",
 		description: [
 			"Restore entries removed by memory_forget using the recovery ID returned by that tool.",
 			"Restoration is idempotent and appends only missing entries, so later memory writes survive.",
 		].join("\n"),
-		parameters: Type.Object({
-			recoveryId: Type.String({ description: "Recovery ID returned by memory_forget" }),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+		input: {
+			type: "object",
+			properties: {
+				recoveryId: { type: "string", description: "Recovery ID returned by memory_forget" },
+			},
+			required: ["recoveryId"],
+			additionalProperties: false,
+		},
+		async execute(params, _ctx) {
 			ensureDirs();
 			const loaded = readRecoveryRecord(params.recoveryId);
 			if (!loaded) {
@@ -2402,9 +1917,8 @@ export function registerExtension(pi: ExtensionAPI) {
 			if (missingEntries.length > 0) {
 				const separator = existing.trim() ? "\n\n" : "";
 				fs.writeFileSync(targetPath, `${existing}${separator}${missingEntries.join("\n\n")}\n`, "utf-8");
-				// Restore changes which durable facts are authoritative, so refresh the
-				// snapshot instead of persisting restored content in a correction message.
-				refreshMemorySnapshot("memory_restore");
+				// Restore changes which durable facts are authoritative, so invalidate
+				// every live session's snapshot.
 				markAllSessionsDirty();
 				await ensureQmdAvailableForUpdate();
 				scheduleQmdUpdate();
@@ -2430,12 +1944,9 @@ export function registerExtension(pi: ExtensionAPI) {
 				},
 			};
 		},
-	});
-
-	// --- memory_search tool ---
-	pi.registerTool({
+	},
+	{
 		name: "memory_search",
-		label: "Memory Search",
 		description:
 			"Search across all memory files (MEMORY.md, SCRATCHPAD.md, daily logs).\n" +
 			"Modes:\n" +
@@ -2445,16 +1956,21 @@ export function registerExtension(pi: ExtensionAPI) {
 			"If semantic/deep warns about missing embeddings, embedding starts automatically in the background — retry shortly.\n" +
 			"If the first search doesn't find what you need, try rephrasing or switching modes. " +
 			"Keyword mode is best for specific terms; semantic mode finds related concepts even with different wording.",
-		parameters: Type.Object({
-			query: Type.String({ description: "Search query" }),
-			mode: Type.Optional(
-				StringEnum(["keyword", "semantic", "deep"] as const, {
+		input: {
+			type: "object",
+			properties: {
+				query: { type: "string", description: "Search query" },
+				mode: {
+					type: "string",
+					enum: ["keyword", "semantic", "deep"],
 					description: "Search mode. Default: 'keyword'.",
-				}),
-			),
-			limit: Type.Optional(Type.Number({ description: "Max results (default: 5)" })),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+				},
+				limit: { type: "number", description: "Max results (default: 5)" },
+			},
+			required: ["query"],
+			additionalProperties: false,
+		},
+		async execute(params, _ctx) {
 			const mode = params.mode ?? "keyword";
 			const limit = clampSearchLimit(params.limit);
 
@@ -2537,19 +2053,21 @@ export function registerExtension(pi: ExtensionAPI) {
 				};
 			}
 		},
-	});
-
-	// --- memory_status tool (doctor) ---
-	pi.registerTool({
+	},
+	{
 		name: "memory_status",
-		label: "Memory Status",
 		description:
 			"Report the health of the memory system: where files live, what's stored, " +
 			"whether qmd search is available, whether the pi-memory collection exists, " +
 			"whether embeddings are ready, and the active configuration. " +
 			"Use this when search behaves unexpectedly or to confirm setup.",
-		parameters: Type.Object({}),
-		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
+		input: {
+			type: "object",
+			properties: {},
+			required: [],
+			additionalProperties: false,
+		},
+		async execute(_params, _ctx) {
 			ensureDirs();
 			const inv = getMemoryInventory();
 
@@ -2606,10 +2124,6 @@ export function registerExtension(pi: ExtensionAPI) {
 				`- PI_MEMORY_QMD_SEARCH_TIMEOUT_MS: ${getQmdSearchTimeoutMs()}`,
 				`- PI_MEMORY_EMBED_PROBE_TIMEOUT_MS: ${getEmbedProbeTimeoutMs()}`,
 				`- PI_MEMORY_DIR: ${process.env.PI_MEMORY_DIR ? "set" : "default"}`,
-				`- PI_MEMORY_EXIT_SUMMARY: ${isExitSummaryEnabled() ? "enabled" : "disabled"}`,
-				`- PI_MEMORY_EXIT_SUMMARY_MODEL: ${process.env.PI_MEMORY_EXIT_SUMMARY_MODEL?.trim() || "session model"}`,
-				`- PI_MEMORY_EXIT_SUMMARY_REASONING_EFFORT: ${getExitSummaryReasoningEffort() ?? "off"}`,
-				`- PI_MEMORY_EXIT_SUMMARY_TIMEOUT_MS: ${getExitSummaryTimeoutMs()}`,
 			);
 
 			return {
@@ -2624,15 +2138,41 @@ export function registerExtension(pi: ExtensionAPI) {
 				},
 			};
 		},
-	});
+	},
+];
+
+// Derived from the plugin SDK so the mapping stays honest across SDK upgrades.
+type ToolEditor = Parameters<Parameters<Plugin.Context["tool"]["transform"]>[0]>[0];
+type OpenCodeTool = Parameters<ToolEditor["add"]>[0];
+
+/**
+ * Adapt an internal definition to the V2 boundary. V2's Tool.Result accepts
+ * `content?: string | ReadonlyArray<Content>` plus `metadata`; the internal
+ * `isError` flag is signalled by rejecting, which the promise adapter turns into
+ * a tool error.
+ */
+function toOpenCodeTool(def: MemoryToolDefinition): OpenCodeTool {
+	return {
+		name: def.name,
+		description: def.description,
+		input: def.input as unknown as OpenCodeTool["input"],
+		execute: async (input, context) => {
+			const result = await def.execute(input, {
+				sessionManager: { getSessionId: () => context.sessionID },
+			});
+			const text = result.content.map((part) => part.text).join("\n\n");
+			if (result.isError) throw new Error(text);
+			return { content: text, metadata: result.details };
+		},
+	};
 }
 
 // ---------------------------------------------------------------------------
 // OpenCode V2 plugin entry point
 //
 // OpenCode loads a plugin file only when its default export is `{ id, setup }`.
-// The pi-shaped `registerExtension` above is kept verbatim until Phase 3; this
-// section is the V2 skeleton plus the cached snapshot injection.
+// Registers the memory tools, the context/compaction hooks and the event
+// subscription. There is no pi coupling in this file.
 // ---------------------------------------------------------------------------
 
 const SNAPSHOT_SENTINEL = "<!-- oc2-memory:snapshot -->";
@@ -2744,6 +2284,12 @@ async function handleSessionCreated(sessionID: string) {
  */
 export async function setup(ctx: Plugin.Context): Promise<Plugin.Cleanup> {
 	const controller = new AbortController();
+
+	await ctx.tool.transform((editor) => {
+		for (const tool of MEMORY_TOOLS) {
+			editor.add(toOpenCodeTool(tool));
+		}
+	});
 
 	await ctx.session.hook("context", (event) => {
 		event.system = upsertSnapshotPart(event.system, getSessionSnapshot(event.sessionID));

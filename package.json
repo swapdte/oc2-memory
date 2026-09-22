@@ -50,17 +50,12 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.0",
-		"@earendil-works/pi-ai": "0.84.1",
-		"@earendil-works/pi-coding-agent": "0.84.1",
 		"@opencode/plugin": "2.0.2",
 		"tsup": "^8.5.0",
 		"tsx": "^4.0.0",
 		"typescript": "^5.9.3"
 	},
-	"peerDependencies": {
-		"@earendil-works/pi-ai": ">=0.81.1",
-		"@earendil-works/pi-coding-agent": ">=0.81.1"
-	},
+	"peerDependencies": {},
 	"engines": {
 		"node": ">=22.19.0"
 	},
