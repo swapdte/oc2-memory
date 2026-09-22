@@ -42,14 +42,13 @@ $ cat ~/.pi/agent/memory/MEMORY.md
 ```bash
 # From npm, once published
 opencode plugin add oc2-memory
-
-# …or straight from the repository
-opencode plugin add github:swapdte/oc2-memory
 ```
 
-`opencode plugin add` writes the package into the **`plugins`** array of your global OpenCode config (`~/.config/opencode/opencode.json`). The legacy `plugin` key and `opencode plugin <repo>` form belong to older OpenCode versions.
+`opencode plugin add` writes the package into the **`plugins`** array of your global OpenCode config (`~/.config/opencode/opencode.json`) and lets OpenCode fetch it into its own cache under `~/.cache/opencode/`. The legacy `plugin` key and `opencode plugin <repo>` form belong to older OpenCode versions.
 
-> **Local paths are not accepted.** OpenCode 2.x only installs from an npm specifier or a git specifier — `file:`, `./dir` and absolute paths are rejected. To run a checkout you are editing, point `plugins` at it yourself.
+> **A git specifier will not work here yet.** `opencode plugin add github:swapdte/oc2-memory` fails with *"Plugin package has no server or TUI entrypoint"*. OpenCode installs with lifecycle scripts disabled, so nothing runs a build, and this repository does not commit `dist/`. A `prepare` script cannot fix that — the install never executes it. Until the package is on npm, run it from a local build (see [Development](#development)).
+
+> **`opencode plugin add` refuses local paths.** OpenCode 2.x installs from an npm or git specifier only; `file:`, `./dir` and absolute paths are rejected. A checkout still runs — through the config rather than the CLI.
 
 That's it — the seven core tools (`memory_write`, `memory_forget`, `memory_restore`, `memory_read`, `scratchpad`, `memory_search`, `memory_status`) work with no other setup.
 
@@ -219,7 +218,13 @@ npm run build        # tsup → dist/, then tsc --noEmit
 npm run lint         # biome
 ```
 
-To try a build locally, add the checkout to the `plugins` array of `~/.config/opencode/opencode.json` by path — `opencode plugin add` rejects local paths.
+To run a local build, add the **built directory** to the `plugins` array of `~/.config/opencode/opencode.json` — `opencode plugin add` refuses local paths, so this is a config edit:
+
+```json
+{ "plugins": ["/absolute/path/to/oc2-memory/dist"] }
+```
+
+The path must be a **directory**; a bare file is ignored with a warning. Inside it OpenCode looks for `server.*` then `index.*` and does not consult `package.json`, so point it at `dist/` and never at the repository root — the root `index.ts` is the source file, and during the port it still holds pi-memory's implementation. Alternatively, copy the built `dist/index.js` into `~/.config/opencode/plugins/`, which OpenCode scans for `.js` and `.ts` files.
 
 ```bash
 npm test             # fast unit suite: no API key, no qmd
