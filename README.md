@@ -208,6 +208,10 @@ Deliberately **not** ported from pi-memory:
 
 The plugin is a single source file, `index.ts`, built with `tsup` to `dist/index.js`. OpenCode resolves a plugin's entrypoints as module paths, so there is a build step — but source and artefact are one file each.
 
+### Working documents
+
+`DECISIONS.md` records every settled technical decision behind the port, and `PLAN.md` holds the phase plan with its gates. Both are written in **German** — the language they were drafted in — while the rest of the repository is English. `AGENTS.md` points at them, and where they disagree with it about the port's target behaviour, they win.
+
 ```bash
 npm install          # also points git at .githooks
 npm run build        # tsup → dist/, then tsc --noEmit
