@@ -102,22 +102,68 @@ jobs:
         run: |
           node --import tsx -e "import('./index.ts').then(async (m) => { m.ensureDirs(); const ok = await m.setupQmdCollection(); if (!ok) { console.error('setupQmdCollection returned false — wrapper did not fix qmd invocation'); process.exit(1); } console.log('OK: extension wrapper successfully invoked qmd through the Windows shell'); }).catch((e) => { console.error('FAILED:', e); process.exit(1); });"
 
-      - name: Smoke — resolveMemoryDir USERPROFILE fallback
+      - name: Smoke — memory path contract (USERPROFILE fallback + active dir)
         shell: pwsh
+        env:
+          EXTENSION_PATH: ${{ github.workspace }}\index.ts
         run: |
           Remove-Item Env:HOME -ErrorAction SilentlyContinue
           Remove-Item Env:PI_MEMORY_DIR -ErrorAction SilentlyContinue
           if (-not $env:USERPROFILE) { Write-Error "USERPROFILE is not set on this runner"; exit 1 }
-          $expectedPrefix = Join-Path $env:USERPROFILE ".pi\agent\memory"
-          Write-Host "Expected prefix: $expectedPrefix"
-          $actual = node --import tsx -e "import('./index.ts').then(m => { console.log(m.dailyPath('2026-01-01')); });"
-          Write-Host "ensureDirs/dailyPath returned: $actual"
-          if ($actual -notlike "$expectedPrefix*") {
-            Write-Error "FAILED: resolveMemoryDir did not honor USERPROFILE fallback. Got: $actual"
-            exit 1
-          }
-          if ($actual -like "*~\.pi*") {
-            Write-Error "FAILED: literal '~' subdirectory still present in resolved path"
-            exit 1
-          }
-          Write-Host "OK: memory directory resolved under USERPROFILE"
+
+          # Path logic is pure JS so the same assertions run on Windows and Linux.
+          # It checks the port contract: resolveMemoryDir stays pure (~/.pi), while
+          # resolveActiveMemoryDir picks ~/.oc2-memory on a fresh runner and only
+          # prefers the pi store when it actually exists. ensureDirs/dailyPath are
+          # pinned to an explicit base dir so the job does not depend on runner home state.
+          $script = @'
+          (async () => {
+            const assert = (await import("node:assert/strict")).default;
+            const fs = await import("node:fs");
+            const os = await import("node:os");
+            const path = await import("node:path");
+            const { pathToFileURL } = await import("node:url");
+
+            const m = await import(pathToFileURL(process.env.EXTENSION_PATH).href);
+            const userProfile = process.env.USERPROFILE;
+            const env = { USERPROFILE: userProfile };
+
+            const piPath = path.join(userProfile, ".pi", "agent", "memory");
+            const oc2Path = path.join(userProfile, ".oc2-memory");
+
+            assert.equal(m.resolveMemoryDir(env), piPath, "resolveMemoryDir must stay pure");
+            assert.equal(
+              m.resolveActiveMemoryDir(env, () => false),
+              oc2Path,
+              "missing pi store must fall back to ~/.oc2-memory",
+            );
+            assert.equal(
+              m.resolveActiveMemoryDir(env, (p) => p === piPath),
+              piPath,
+              "existing pi store must win",
+            );
+            assert.ok(!m.resolveActiveMemoryDir(env, () => false).includes("~"), "literal ~ must not appear");
+
+            const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "oc2-memory-paths-"));
+            try {
+              m._setBaseDir(tmp);
+              m.ensureDirs();
+              const daily = m.dailyPath("2026-01-01");
+              assert.ok(daily.startsWith(tmp), `dailyPath must live under the active dir, got ${daily}`);
+              assert.ok(fs.existsSync(path.join(tmp, "daily")), "ensureDirs must create daily/ under the active dir");
+            } finally {
+              m._resetBaseDir();
+              fs.rmSync(tmp, { recursive: true, force: true });
+            }
+
+            console.log("OK: resolveMemoryDir(USERPROFILE) ->", piPath);
+            console.log("OK: resolveActiveMemoryDir (missing pi store) ->", oc2Path);
+            console.log("OK: resolveActiveMemoryDir (existing pi store) ->", piPath);
+            console.log("OK: ensureDirs/dailyPath use the active dir");
+          })().catch((e) => {
+            console.error("FAILED:", e);
+            process.exit(1);
+          });
+          '@
+          node --import tsx -e $script
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
