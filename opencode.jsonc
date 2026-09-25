@@ -1,0 +1,209 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // ==========================================================================
+  // OpenCode V2 permissions - generic base template
+  // --------------------------------------------------------------------------
+  // This file is an ALLOW-LIST. The baseline is `ask`; only the explicitly
+  // listed read-only commands run without confirmation. It is project-agnostic
+  // and meant to be the base for derived, project-specific versions.
+  //
+  // Threat model (what this file defends against):
+  //   1. Destructive commands: `rm -rf` on /, ~, $HOME, . or .., and privilege
+  //      escalation via sudo / doas / AUR helpers.
+  //   2. Secret leakage: .env files, SSH keys, cloud credentials, gh tokens and
+  //      key material - through the `read` tool AND through shell commands.
+  //   3. Silent code execution: package managers, build/test runners,
+  //      docker/kubectl/cloud CLIs and generic command runners.
+  //
+  // Deliberate non-goals:
+  //   - Hardening against prompt injection (ask is not a sandbox).
+  //   - Filesystem sandboxing: `external_directory` is intentionally unused.
+  //   - Restricting `subagent`, `skill`, `question`, `execute`, `webfetch`,
+  //     `websearch`.
+  //
+  // Documented matching semantics (OpenCode V2):
+  //   - Rules are evaluated in order; the LAST match wins.
+  //   - `*` matches zero or more characters, including `/`; `?` matches one.
+  //   - A pattern ending in ` *` also matches the command without arguments.
+  //   - A configured `deny` can never be lifted by a saved approval.
+  //   - `experimental.policies` run AFTER all permission rules and saved
+  //     approvals and can only tighten. Their precedence is REVERSED: broader
+  //     configuration (global / Console) is evaluated later and can override
+  //     the policies defined here.
+  //   - Matching happens against the scanner-produced command string, not a
+  //     shell AST. This is textual, not shell-aware.
+  //
+  // Never move the baseline rule or the deny blocks to the middle of the array.
+  // ==========================================================================
+
+  "permissions": [
+    // ----------------------------------------------------------------------
+    // 1) Baseline: every raw shell command asks for confirmation.
+    // ----------------------------------------------------------------------
+    { "action": "shell", "resource": "*", "effect": "ask" },
+
+    // ----------------------------------------------------------------------
+    // 2) Raw git: read-only subcommands plus push/pull. Everything else
+    //    (reset --hard, clean -fdx, rebase, filter-branch, branch -D) falls
+    //    through to the `ask` baseline.
+    // ----------------------------------------------------------------------
+    { "action": "shell", "resource": "git status *", "effect": "allow" },
+    { "action": "shell", "resource": "git diff *", "effect": "allow" },
+    { "action": "shell", "resource": "git log *", "effect": "allow" },
+    { "action": "shell", "resource": "git show *", "effect": "allow" },
+    { "action": "shell", "resource": "git push *", "effect": "allow" },
+    { "action": "shell", "resource": "git pull *", "effect": "allow" },
+
+    // ----------------------------------------------------------------------
+    // 3) Force-push asks. `--force*` also catches `--force-with-lease`;
+    //    `-f` is a separate pattern. A short flag placed later in the
+    //    argument list (`git push origin -f`) still evades both.
+    // ----------------------------------------------------------------------
+    { "action": "shell", "resource": "git push --force*", "effect": "ask" },
+    { "action": "shell", "resource": "git push -f *", "effect": "ask" },
+
+    // ----------------------------------------------------------------------
+    // 4) rtk allow-list: pure read-only filters only. Everything else rtk
+    //    knows is an executor or a mutator and therefore falls through to the
+    //    `ask` baseline - including `rtk run`, `rtk proxy`, `rtk err`,
+    //    `rtk summary`, `rtk test`, `rtk pipe`, every package manager, every
+    //    build/test/lint wrapper, docker/kubectl/cloud CLIs and `rtk curl` /
+    //    `rtk wget`. Keeping a deny-by-default posture here is what makes this
+    //    block survive future rtk releases.
+    // ----------------------------------------------------------------------
+    { "action": "shell", "resource": "rtk ls *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk tree *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk read *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk find *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk grep *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk rg *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk ast-grep *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk wc *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk json *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk diff *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk log *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk deps *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk env *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk smart *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk recall *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk rewrite *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk gain *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk cc-economics *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk session *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk discover *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk help *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk hook-audit *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk git status *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk git diff *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk git log *", "effect": "allow" },
+    { "action": "shell", "resource": "rtk git show *", "effect": "allow" },
+
+    // ----------------------------------------------------------------------
+    // 5) Secrets - `read` action (resource is the exact file path, so tight
+    //    suffix patterns are safe here). The `.env.example` allow must stay
+    //    AFTER the `.env` denies.
+    // ----------------------------------------------------------------------
+    { "action": "read", "resource": "*.env", "effect": "deny" },
+    { "action": "read", "resource": "*.env.*", "effect": "deny" },
+    { "action": "read", "resource": "*id_rsa*", "effect": "deny" },
+    { "action": "read", "resource": "*id_ed25519*", "effect": "deny" },
+    { "action": "read", "resource": "*/.ssh/*", "effect": "deny" },
+    { "action": "read", "resource": "*.aws/credentials*", "effect": "deny" },
+    { "action": "read", "resource": "*.aws/config*", "effect": "deny" },
+    { "action": "read", "resource": "*.config/gh/hosts.yml", "effect": "deny" },
+    { "action": "read", "resource": "*.git-credentials", "effect": "deny" },
+    { "action": "read", "resource": "*.netrc", "effect": "deny" },
+    { "action": "read", "resource": "*.kdbx", "effect": "deny" },
+    { "action": "read", "resource": "*.pem", "effect": "deny" },
+    { "action": "read", "resource": "*.key", "effect": "deny" },
+    { "action": "read", "resource": "*.p12", "effect": "deny" },
+    { "action": "read", "resource": "*.pfx", "effect": "deny" },
+    { "action": "read", "resource": "*.env.example", "effect": "allow" },
+
+    // ----------------------------------------------------------------------
+    // 6) Secrets - `shell` action. The resource is the whole command string,
+    //    so only unmistakable names are denied. `*.key` / `*.pem` are
+    //    deliberately NOT denied here: `*.key*` would match `src/keyhandler.ts`
+    //    and similar innocuous commands.
+    // ----------------------------------------------------------------------
+    { "action": "shell", "resource": "*.env*", "effect": "deny" },
+    { "action": "shell", "resource": "*id_rsa*", "effect": "deny" },
+    { "action": "shell", "resource": "*id_ed25519*", "effect": "deny" },
+    { "action": "shell", "resource": "*/.ssh/*", "effect": "deny" },
+    { "action": "shell", "resource": "*.aws/credentials*", "effect": "deny" },
+    { "action": "shell", "resource": "*.config/gh/hosts.yml*", "effect": "deny" },
+    { "action": "shell", "resource": "*.git-credentials*", "effect": "deny" },
+    { "action": "shell", "resource": "*.netrc*", "effect": "deny" },
+    { "action": "shell", "resource": "*.kdbx*", "effect": "deny" },
+    { "action": "shell", "resource": "*.env.example*", "effect": "allow" },
+
+    // ----------------------------------------------------------------------
+    // 7) fff MCP tools. Documentation only: the base policy already allows
+    //    MCP tools, so these rules are effectively no-ops.
+    // ----------------------------------------------------------------------
+    { "action": "fff_find_files", "resource": "*", "effect": "allow" },
+    { "action": "fff_grep", "resource": "*", "effect": "allow" },
+    { "action": "fff_multi_grep", "resource": "*", "effect": "allow" },
+
+    // ----------------------------------------------------------------------
+    // 8) rm denies - LAST, because the last matching rule wins.
+    //    Spellings covered: -rf, -fr, -r -f, -f -r, --recursive --force,
+    //    --force --recursive.
+    //    Targets: absolute paths (` /*`, accepted false positive: any absolute
+    //    path such as /tmp/...), `~`, `$HOME`, plus the tail-anchored relative
+    //    targets `.`, `..`, `./`.
+    //    Long-flag spellings are omitted for the relative targets to keep the
+    //    list readable; `rm -rf .` / `rm -fr .` cover the realistic cases.
+    // ----------------------------------------------------------------------
+    { "action": "shell", "resource": "*rm -rf /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -rf ~*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -rf $HOME*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -fr /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -fr ~*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -fr $HOME*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -r -f /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -r -f ~*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -r -f $HOME*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -f -r /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -f -r ~*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -f -r $HOME*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm --recursive --force /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm --recursive --force ~*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm --recursive --force $HOME*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm --force --recursive /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm --force --recursive ~*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm --force --recursive $HOME*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -rf .", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -rf ..", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -rf ./*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -fr .", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -fr ..", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -fr ./*", "effect": "deny" }
+  ],
+
+  // ==========================================================================
+  // Hard denies. Evaluated after every permission rule and after saved
+  // approvals, so an `ask` cannot be approved away. Broader configuration
+  // (global / Console policies) is evaluated even later and can override
+  // these statements.
+  // ==========================================================================
+  "experimental.policies": [
+    "shell:*sudo *",
+    "shell:*doas *",
+    "shell:*paru *",
+    "shell:*yay *",
+    "shell:*rm -rf /*",
+    "shell:*rm -fr /*",
+    "shell:*rm -r -f /*",
+    "shell:*rm -f -r /*",
+    "shell:*rm --recursive --force /*",
+    "shell:*rm --force --recursive /*",
+    "shell:*rm -rf ~*",
+    "shell:*rm -fr ~*",
+    "shell:*rm -r -f ~*",
+    "shell:*rm -f -r ~*",
+    "shell:*rm --recursive --force ~*",
+    "shell:*rm --force --recursive ~*"
+  ]
+}
