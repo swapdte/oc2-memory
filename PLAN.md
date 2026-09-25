@@ -7,11 +7,12 @@ Port von [pi-memory](https://github.com/jayzeng/pi-memory) als **Opencode-V2-Plu
 - Vorgehen: TDD (red → green → refactor), siehe `AGENTS.md`.
 - **Ziel-API: `@opencode/plugin@2.0.2` (V2).** Kein V1-Fallback. Siehe `DECISIONS.md` → API-Lage.
 
-**Aktuelle Phase: 5 (Release).** Phase 0–4 sind abgeschlossen, Phase 6 (Installer-CLI) ist
-code-seitig fertig — der **Release steht noch aus**. `index.ts` ist ein reines V2-Plugin **ohne**
-`@earendil-works/pi-*`-Abhängigkeit; `bin/cli.ts` liefert `npx oc2-memory install|uninstall|status`
-(Node-kompatibel). `npm test` 196/196 grün, `dist/index.js` enthält keine pi-Referenz. Als Nächstes:
-npm-Release (Phase 5), dann den Install-Smoke-Test der CLI.
+**Status: alle Phasen (0–6) abgeschlossen — released.** `oc2-memory@0.1.1` ist seit 2026-09-22
+auf npm veröffentlicht und dort `latest` (Tags `v0.1.0`, `v0.1.1`). `index.ts` ist ein reines
+V2-Plugin **ohne** `@earendil-works/pi-*`-Abhängigkeit; `bin/cli.ts` liefert
+`npx oc2-memory install|uninstall|status` (Node-kompatibel). `npm test` 202/202 grün,
+`dist/index.js` enthält keine pi-Referenz. Offen ist nichts mehr; neue Arbeit beginnt als eigener
+Abschnitt unterhalb der Phasen.
 
 ---
 
@@ -146,17 +147,25 @@ Reihenfolge nach Abhängigkeit, je Tool rote Tests zuerst:
       Test-Kommandos, Doku-Status).
 - [x] `DECISIONS.md` + `PLAN.md` ins Repo committen (deutsch; Status auf Phase 5).
 
-### Phase 5 — Release
-- [ ] `npm run build` (tsup + Typecheck) + `lint` grün.
-- [ ] `prepublishOnly: "npm run build"` ergänzen — das Tarball **muss** `dist/` enthalten.
-      `files` listet es, Git ignoriert es: zwei getrennte Mechanismen.
-- [ ] Tag `v0.1.0`; Publish-Workflow anpassen (npm, `dist/` in `files`) falls gewollt.
-- [ ] Install-Smoke-Test **npm**: `opencode plugin add oc2-memory`.
-- [ ] Install-Smoke-Test **lokal** (dev): `plugins: ["/abs/…/dist"]` in der globalen
+### Phase 5 — Release — **erledigt**
+- [x] `npm run build` (tsup + Typecheck) + `lint` grün. Der `publish-npm.yml`-Workflow fährt
+      `lint` → `build` → `test` vor `npm publish` und ist damit das Gate.
+- [x] `prepublishOnly: "npm run build"` ergänzt (`package.json`) — das Tarball **muss** `dist/`
+      enthalten. `files` listet es, Git ignoriert es: zwei getrennte Mechanismen.
+- [x] Tag `v0.1.0` (`f82a43a`) und `v0.1.1` (`95d6832`); Publish-Workflow auf npm umgestellt,
+      Publishing via **Trusted Publishing (OIDC)** statt `NPM_TOKEN` (`24a6805`, `428281b`,
+      `661ac1f`). `v0.1.1` ist npm-`latest`.
+- [x] Install-Smoke-Test **npm**: `opencode plugin add oc2-memory` bzw. `npx oc2-memory install`.
+- [x] Install-Smoke-Test **lokal** (dev): `plugins: ["/abs/…/dist"]` in der globalen
       Config. Der Pfad muss ein **Verzeichnis** sein (eine bloße Datei wird verworfen);
       `Host.resolve` sucht darin `server.*` dann `index.*` — bei lokalen Verzeichnissen
       wird `package.json` **nicht** gelesen. Alternative: gebaute `dist/index.js` nach
-      `~/.config/opencode/plugins/` kopieren (wird nach `.js`/`.ts` gescannt).
+      `~/.config/opencode/plugins/` kopieren (wird nach `.js`/`.ts` gescannt). Der
+      `--local`-Weg ist der Installationsweg, den `opencode plugin add` verweigert; das
+      Phase-6-Gate deckt ihn ab.
+- **Hinweis zu den Tags:** `v0.3.5`, `v0.3.6` und `v0.4.2` stammen aus der gespiegelten
+  **pi-memory**-Historie (Upstream), nicht aus oc2-memory-Releases. Die oc2-memory-Releases
+  sind ausschließlich `v0.1.0` / `v0.1.1`.
 - **Verifiziert unmöglich (v2.0.8): `opencode plugin add <git-Spec>` für dieses Repo.**
   `plugin add` installiert über arborist mit `ignoreScripts: true` → **kein `prepare`**;
   `dist/` ist gitignored → kein Einstiegspunkt → „Plugin package has no server or TUI
@@ -184,8 +193,9 @@ zum Doppelwesen wie `oh-my-opencode-slim` — `main` = Plugin, `bin` = CLI.
   `install` ist idempotent, `--local .` registriert den absoluten `dist/`-Pfad,
   `uninstall` entfernt beide, kaputtes JSON bricht ohne Überschreiben ab. Läuft unter
   **Node**, ohne Bun.
-- Erst nach Phase 5 sinnvoll: die CLI setzt das veröffentlichte npm-Paket mit
-  `dist/` voraus. → **Code fertig, Release (Phase 5) steht noch aus.**
+- [x] Erst nach Phase 5 sinnvoll: die CLI setzt das veröffentlichte npm-Paket mit `dist/` voraus.
+  → **Erledigt:** `oc2-memory@0.1.1` ist auf npm, damit funktioniert `npx oc2-memory install`.
+
 
 ---
 
